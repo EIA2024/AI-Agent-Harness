@@ -20,8 +20,8 @@ class FakeRunner:
     async def cancel(self, *, run_id):
         self.cancelled.append(run_id)
 
-    async def resume(self, *, run_id):
-        self.resumed.append(run_id)
+    async def resume(self, *, run_id, approval_id=None, decision=None, edited_arguments=None):
+        self.resumed.append((run_id, approval_id, decision, edited_arguments))
 
 
 async def _make_user(api_key: str) -> User:
@@ -92,7 +92,7 @@ async def test_run_resume(make_api, db):
         r = await ac.post(f"/v1/runs/{run.id}/resume", json={}, headers=headers)
         assert r.status_code == 200
         assert r.json()["status"] == "running"
-        assert runner.resumed == [run.id]
+        assert runner.resumed == [(run.id, None, "approved", None)]
 
         # completed runs cannot be resumed
         done = await _make_run(u.id, status="completed")

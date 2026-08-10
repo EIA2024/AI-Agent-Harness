@@ -73,14 +73,17 @@ async def resume_run(
     user=Depends(resolve_user),
     services=Depends(get_services),
 ) -> dict:
-    """Resume a paused/interrupted run, resolving an approval when supplied."""
-    if body.approval_id is not None and services.approval_engine is not None:
-        await services.approval_engine.resolve(
-            body.approval_id,
-            decision=body.decision or "approve",
-            approved_by=user.id,
-            edited_arguments=body.edited_arguments,
-        )
+    """Resume a paused/interrupted run.
+
+    When ``body.approval_id`` is supplied, the run's runner resolves the
+    approval (binding the decision + edited arguments) and continues the graph.
+    Approval resolution lives entirely in the runner so the receipt can be
+    threaded into the resume command; the API layer never calls the approval
+    engine directly.
+    """
+    runner = services.runner
+    if runner is None or not hasattr(runner, "resume"):
+        raise HTTPException(status_code=503, detail="Agent runner is not wired up")
 
     async with session_scope() as s:
         result = await s.execute(select(Run).where(Run.id == run_id, Run.owner_id == user.id))
@@ -95,7 +98,27 @@ async def resume_run(
         await s.refresh(run)
         data = run_to_dict(run)
 
-    runner = services.runner
-    if runner is not None and hasattr(runner, "resume"):
-        await runner.resume(run_id=run_id)
+    decision = _normalize_approval_decision(body.decision)
+    await runner.resume(
+        run_id=run_id,
+        approval_id=body.approval_id,
+        decision=decision,
+        edited_arguments=body.edited_arguments,
+    )
     return data
+
+
+def _normalize_approval_decision(raw: str | None) -> str | None:
+    """Map loose client strings to the canonical ApprovalEngine decisions."""
+    if raw is None:
+        return "approved"
+    canonical = {
+        "approve": "approved",
+        "approved": "approved",
+        "approve_with_edits": "approved_with_edits",
+        "approved_with_edits": "approved_with_edits",
+        "reject": "rejected",
+        "rejected": "rejected",
+    }
+    return canonical.get(raw.strip().lower(), raw)
+
