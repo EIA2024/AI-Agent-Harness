@@ -5,14 +5,32 @@
 ## 已修复
 
 ### FIX-1: 审批决策字符串不匹配 + 重复 resolve（严重）
-- **现象**：API `resume_run` 调用 `approval_engine.resolve(decision="approve")`，但 ApprovalEngine 期望 `"approved"`/`"rejected"`/`"approved_with_edits"`，会抛 ValueError。
-- **根因**：API 层与审批引擎对决策词汇的契约不一致；且 API 自行 resolve 审批、又不把 receipt 传给 Runner，导致"批准 A 执行 B"的 hash 绑定链路断裂。
-- **修复**：`apps/api/routers/runs.py` — 删除 API 内重复 resolve；统一委托 `runner.resume(run_id, approval_id, decision, edited_arguments)`；新增 `_normalize_approval_decision()` 规范化客户端字符串。审批生命周期完全由 Runner 持有。
+- **现象**：API `resume_run` 调用 `approval_engine.resolve(decision="approve")`，但 ApprovalEngine 期望 `"approved"`/`"rejected"`/`"approved_with_edits"`；且 API 自行 resolve 又不把 receipt 传给 Runner。
+- **修复**：API 删除重复 resolve，统一委托 `runner.resume(run_id, approval_id, decision, edited_arguments)`；新增 `_normalize_approval_decision()`。审批生命周期由 Runner 持有。
 
 ### FIX-2: ServiceContainer 占位类名与真实实现不符（严重）
-- **现象**：`build_default_services` 引用 `Runner`/`InMemoryEventBus`/`ModelClient`/`MemoryStore`/`ContextEngine`/`SchedulerService`/`AuditLogger` 等占位名，全部 import 失败 → 所有服务降级为 None。
-- **根因**：API 子 Agent 在兄弟模块不存在时用猜测的类名写接线代码。
-- **修复**：`src/personal_ai_os/gateway/services.py` 重写为真实依赖图（EventBus→Memory/Audit、Policy→Broker、Memory→Context、Model→Runner），并为 `context_engine`/`scheduler`/`observability`/`agent_runtime` 补了包级导出。无 API Key 时回退 EchoProvider（demo 模式）。
+- **现象**：`build_default_services` 引用 `Runner`/`InMemoryEventBus`/`ModelClient` 等占位名，全部 import 失败 → 所有服务降级为 None。
+- **修复**：重写为真实依赖图 + 补包级导出；无 API Key 时回退 EchoProvider（demo 模式）。
+
+### FIX-3: 审批链路双重执行 + verify 未落地（严重，安全）
+- **现象**：真实 ToolBroker + 审批流程：批准后重新执行会再次触发 policy "ask" → 无限审批环；且 ApprovalEngine 计算的 argument_hash 从未在 broker 边界被校验。
+- **修复**：`ToolBroker` 注入 `approval_engine`；`execute()` 在 policy=="ask" 且 ctx.approval_id 存在时调用 `verify_approval(id, tool, args)` 校验精确参数 hash，通过才执行，不通过返回 POLICY_DENIED。新增 `ApprovalEngine.verify_approval()`。
+
+### FIX-4: 工具调用被记录两次（数据一致性）
+- **现象**：broker 的 `_record` 与 runner 的 `_persist_tool_calls` 各写一条 ToolCall 行 → 每个工具调用两条记录。
+- **修复**：graph 序列化工具结果时携带 `idempotency_key`；runner 按 `approval_id` 或 `idempotency_key` 找到 broker 已写的行进行更新/跳过，不新建；broker 审批场景更新 awaiting_approval 行。broker 的 "denied/error" 丰富状态被保留。
+
+### FIX-5: 审批预览参数解析 bug（安全，hash 绑定失效）
+- **现象**：`_handle_approval_interrupt` 用 `json.loads(arguments)` 解析工具参数，但模型可能直接返回 dict → 解析失败 → preview 存成 `{}` → verify 失败。
+- **修复**：兼容 dict/str 两种格式（与 `_extract_tool_call_fields` 对齐）。
+
+### FIX-6: PostgreSQL 循环外键 + naive/aware datetime（跨方言）
+- **现象**：`runs.session_id ↔ sessions.active_run_id` 循环 FK 使 PG 无法建/删表；PG 返回 aware datetime 而 SQLite 返回 naive，`recency_factor`/审批过期比较在 PG 上 TypeError。
+- **修复**：`sessions.active_run_id` 去掉 FK 约束（保留列+索引）；`common/utils.py` 新增 `utc_now()`/`ensure_aware()`，记忆排序与审批过期比较统一使用。
+
+### FIX-7: 默认服务接线 + API 契约失配（真实服务器冒烟测试发现）
+- **现象**：`build_default_services` 未注册连接器工具（registry 空 → 无工具可用）；tools 路由调 `list_tools()`（实际是 `list_all()`）；runner 返回 `id` 而 API 期望 `run_id`。
+- **修复**：新增 async `complete_wiring()`（注册连接器 + 构建 graph/runner），在 app lifespan 调用；tools 路由兼容 `list_all`；`get_run` 同时返回 `id`/`run_id`。
 
 ## 待合并 tools 后验证
 
