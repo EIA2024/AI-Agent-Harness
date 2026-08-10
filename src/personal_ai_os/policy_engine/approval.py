@@ -15,6 +15,7 @@ from uuid import UUID, uuid4
 
 from ..common.models import ApprovalReceipt, ApprovalRequest
 from ..common.utils import argument_hash as compute_argument_hash
+from ..common.utils import ensure_aware, utc_now
 from ..db.models import Approval
 from ..db.session import session_scope
 
@@ -61,7 +62,7 @@ class ApprovalEngine:
             requires_auth_method=requires_auth_method,
             status="pending",
             expires_at=expires_at,
-            created_at=datetime.utcnow(),
+            created_at=utc_now(),
         )
         async with session_scope() as session:
             session.add(row)
@@ -74,7 +75,7 @@ class ApprovalEngine:
             row = await session.get(Approval, approval_id)
             if row is None:
                 return None
-            if row.status == "pending" and row.expires_at is not None and datetime.utcnow() > row.expires_at:
+            if row.status == "pending" and row.expires_at is not None and utc_now() > ensure_aware(row.expires_at):
                 row.status = "expired"
                 await session.flush()
             return _to_request(row)
@@ -99,7 +100,7 @@ class ApprovalEngine:
                 raise ValueError(f"Approval {approval_id} not found")
             if row.status != "pending":
                 raise ValueError(f"Approval {approval_id} already {row.status}")
-            if row.expires_at is not None and datetime.utcnow() > row.expires_at:
+            if row.expires_at is not None and utc_now() > ensure_aware(row.expires_at):
                 row.status = "expired"
                 await session.flush()
                 raise ValueError(f"Approval {approval_id} has expired")
@@ -135,7 +136,7 @@ class ApprovalEngine:
             return False
         if receipt.decision not in ("approved", "approved_with_edits"):
             return False
-        if receipt.expires_at is not None and datetime.utcnow() > receipt.expires_at:
+        if receipt.expires_at is not None and utc_now() > ensure_aware(receipt.expires_at):
             return False
         if receipt.tool_name != tool_name:
             return False
@@ -155,7 +156,7 @@ class ApprovalEngine:
                 return False
             if row.status not in ("approved", "edited"):
                 return False
-            if row.expires_at is not None and datetime.utcnow() > row.expires_at:
+            if row.expires_at is not None and utc_now() > ensure_aware(row.expires_at):
                 return False
             if row.tool_name != tool_name:
                 return False

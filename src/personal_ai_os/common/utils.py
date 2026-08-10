@@ -5,7 +5,24 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from datetime import datetime, timezone
 from typing import Any
+
+
+def utc_now() -> datetime:
+    """Timezone-aware UTC now. Use this (not datetime.utcnow) for comparisons
+    that must work on both SQLite (naive) and PostgreSQL (aware) datetimes."""
+    return datetime.now(timezone.utc)
+
+
+def ensure_aware(dt: datetime | None) -> datetime | None:
+    """Normalize a possibly-naive datetime to aware UTC for dialect-safe
+    comparisons. PostgreSQL returns aware datetimes; SQLite returns naive ones."""
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
 
 
 def stable_json(value: Any) -> str:

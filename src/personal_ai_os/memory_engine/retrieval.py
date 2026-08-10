@@ -31,10 +31,17 @@ def keyword_score(query: str, content: str) -> float:
 
 
 def recency_factor(created_at: datetime | None, half_life_days: float = 30.0) -> float:
-    """Exponential time decay: ``0.5 ** (days / half_life_days)``."""
+    """Exponential time decay: ``0.5 ** (days / half_life_days)``.
+
+    Dialect-safe: SQLite returns naive datetimes, PostgreSQL returns aware ones,
+    so both are normalized to aware UTC before subtracting.
+    """
+    from ..common.utils import ensure_aware, utc_now
+
     if created_at is None:
         return 1.0
-    now = datetime.utcnow()
+    created_at = ensure_aware(created_at)
+    now = utc_now()
     days = (now - created_at).total_seconds() / 86_400.0
     if days < 0:
         return 1.0

@@ -96,7 +96,12 @@ class Session(Base):
     title: Mapped[str | None] = mapped_column(String(200))
     status: Mapped[str] = mapped_column(String(32), default="active")
     context: Mapped[dict] = mapped_column(JSON, default=dict)
-    active_run_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("runs.id"))
+    # Soft pointer to the session's active run. Kept as a plain UUID (no FK)
+    # because a hard FK would form a cycle with runs.session_id — PostgreSQL
+    # cannot drop/create tables in a FK cycle, and SQLite's FK pragma would
+    # reject the related flush ordering. The app enforces referential
+    # integrity via the runs.session_id FK.
+    active_run_id: Mapped[uuid.UUID | None] = mapped_column(PG_UUID(as_uuid=True), index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
     last_active_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
 
