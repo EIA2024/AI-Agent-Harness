@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.eggs/
+build/
+dist/
+.coverage
+htmlcov/
+.pytest_cache/
+.ruff_cache/
+
+# Env & secrets
+.env
+.env.*
+!.env.example
+*.pem
+*id_rsa*
+credentials.json
+token.json
+
+# Runtime data
+data/
+*.sqlite3
+*.db
+
+# Node
+node_modules/
+.next/
+out/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Claude
+.claude/worktrees/

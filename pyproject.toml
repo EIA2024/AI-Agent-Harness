@@ -1,0 +1,54 @@
+[project]
+name = "personal-ai-os"
+version = "0.1.0"
+description = "Personal AI OS — a long-running personal Agent Runtime with persistent identity, memory, safe tool access, and auditable behavior."
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "sse-starlette>=2.1",
+    "pydantic>=2.9",
+    "pydantic-settings>=2.5",
+    "sqlalchemy[asyncio]>=2.0.36",
+    "aiosqlite>=0.20",
+    "asyncpg>=0.30",
+    "alembic>=1.13",
+    "httpx>=0.27",
+    "python-dotenv>=1.0",
+    "langgraph>=0.2.60",
+    "langgraph-checkpoint>=2.0.10",
+    "langchain-core>=0.3.50",
+    "anthropic>=0.40",
+    "pyyaml>=6.0",
+    "greenlet>=3.1",
+    "uuid6>=2024.7.10",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+    "anyio>=4.6",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/personal_ai_os"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+filterwarnings = [
+    "ignore::DeprecationWarning",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP"]
+ignore = ["E501"]
