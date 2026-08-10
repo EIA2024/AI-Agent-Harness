@@ -1,10 +1,10 @@
-"""Shared pytest configuration and fixtures (merged from mpm + api departments).
+"""Shared pytest configuration and fixtures (merged from mpm + api + tools).
 
 - Puts the repo root and ``src/`` on ``sys.path`` so both ``apps`` and
   ``personal_ai_os`` are importable regardless of how pytest is launched.
 - Resets the global DB engine to a fresh in-memory SQLite schema before each
-  test, so DB-touching tests (memory/approval/runner) and API tests both get a
-  clean database.
+  test, so DB-touching tests (memory/approval/runner/tools) and API tests all
+  get a clean database.
 - Provides an ``api`` factory fixture that runs the app in-process via httpx
   ``ASGITransport`` (single event loop — compatible with async SQLAlchemy,
   unlike starlette's thread-based TestClient).
@@ -22,6 +22,9 @@ SRC = os.path.join(ROOT, "src")
 for _path in (ROOT, SRC):
     if _path not in sys.path:
         sys.path.insert(0, _path)
+
+# Keep accidental db.session usage off PostgreSQL during tests.
+os.environ.setdefault("DATABASE_URL", "sqlite+aiosqlite:///:memory:")
 
 from personal_ai_os.db import session as db_session  # noqa: E402
 

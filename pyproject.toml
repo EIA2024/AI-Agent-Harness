@@ -9,6 +9,7 @@ dependencies = [
     "sse-starlette>=2.1",
     "pydantic>=2.9",
     "pydantic-settings>=2.5",
+    "jsonschema>=4.20",
     "sqlalchemy[asyncio]>=2.0.36",
     "aiosqlite>=0.20",
     "asyncpg>=0.30",
