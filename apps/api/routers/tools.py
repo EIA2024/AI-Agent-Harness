@@ -26,7 +26,12 @@ async def list_tools(user=Depends(resolve_user), services=Depends(get_services))
     if registry is None:
         return []
 
-    # Prefer a ``list_tools()`` method; tolerate a plain ``.tools`` collection too.
+    # ToolRegistry exposes list_all(); tolerate list_tools() for duck-typed registries.
+    if hasattr(registry, "list_all"):
+        result = registry.list_all()
+        if inspect.isawaitable(result):
+            result = await result
+        return [_to_dict(t) for t in result]
     if hasattr(registry, "list_tools"):
         result = registry.list_tools()
         if inspect.isawaitable(result):

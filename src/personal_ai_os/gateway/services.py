@@ -148,28 +148,56 @@ def build_default_services() -> ServiceContainer:
 
     # -- runner -------------------------------------------------------------
 
-    def _runner():
-        if container.model_provider is None or container.tool_broker is None or container.context_engine is None:
-            return None
-        from personal_ai_os.agent_runtime import RunRunner, build_graph
+    # The runner (and connector registration) requires async work, so it is
+    # built in complete_wiring() during app startup.
 
-        graph = build_graph(
-            context_engine=container.context_engine,
-            model_provider=container.model_provider,
-            tool_broker=container.tool_broker,
-            memory_store=container.memory_store,
-        )
-        return RunRunner(
-            graph=graph,
-            model_provider=container.model_provider,
-            tool_broker=container.tool_broker,
-            memory_store=container.memory_store,
-            context_engine=container.context_engine,
-            policy_engine=container.policy_engine,
-            approval_engine=container.approval_engine,
-            event_bus=container.event_bus,
-        )
+    return container
 
-    container.runner = _lazy(_runner)
+
+async def complete_wiring(container: ServiceContainer) -> ServiceContainer:
+    """Finish the async part of wiring: register connector tools into the
+    broker's registry, then build the graph + runner.
+
+    Called from the API lifespan. Idempotent-safe: a container already wired
+    (runner not None) is returned as-is.
+    """
+    if container.runner is not None:
+        return container
+
+    if container.tool_broker is not None:
+        from connectors import get_builtin_connectors
+
+        try:
+            for connector in get_builtin_connectors():
+                await container.tool_broker.register_connector(connector)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Connector registration failed: %s", exc)
+
+    if (
+        container.model_provider is not None
+        and container.tool_broker is not None
+        and container.context_engine is not None
+    ):
+        try:
+            from personal_ai_os.agent_runtime import RunRunner, build_graph
+
+            graph = build_graph(
+                context_engine=container.context_engine,
+                model_provider=container.model_provider,
+                tool_broker=container.tool_broker,
+                memory_store=container.memory_store,
+            )
+            container.runner = RunRunner(
+                graph=graph,
+                model_provider=container.model_provider,
+                tool_broker=container.tool_broker,
+                memory_store=container.memory_store,
+                context_engine=container.context_engine,
+                policy_engine=container.policy_engine,
+                approval_engine=container.approval_engine,
+                event_bus=container.event_bus,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Runner wiring failed: %s", exc)
 
     return container

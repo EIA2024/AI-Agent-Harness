@@ -281,6 +281,7 @@ class RunRunner:
                 raise KeyError(f"Run not found: {run_id}")
             return {
                 "id": str(run.id),
+                "run_id": str(run.id),  # convenience alias for the API contract
                 "owner_id": str(run.owner_id),
                 "session_id": str(run.session_id) if run.session_id else None,
                 "agent_id": str(run.agent_id) if run.agent_id else None,

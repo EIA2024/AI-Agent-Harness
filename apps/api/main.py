@@ -15,7 +15,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from personal_ai_os.db import session as db_session
-from personal_ai_os.gateway.services import ServiceContainer, build_default_services
+from personal_ai_os.gateway.services import ServiceContainer, build_default_services, complete_wiring
 
 from . import config
 from .deps import ensure_dev_owner
@@ -37,6 +37,8 @@ async def ensure_database() -> None:
 async def lifespan(app: FastAPI):
     await ensure_database()
     await ensure_dev_owner()
+    # Async wiring: register connector tools, build the graph + runner.
+    await complete_wiring(app.state.services)
     yield
 
 
