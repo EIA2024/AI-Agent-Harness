@@ -348,6 +348,23 @@ class ApprovalRequest:
         self.status = status
         self.created_at = created_at or datetime.utcnow()
 
+    def to_dict(self) -> dict:
+        return {
+            "id": str(self.id),
+            "run_id": str(self.run_id),
+            "session_id": str(self.session_id) if self.session_id else None,
+            "owner_id": str(self.owner_id),
+            "action_summary": self.action_summary,
+            "tool_name": self.tool_name,
+            "arguments_preview": self.arguments_preview,
+            "risk_level": self.risk_level,
+            "risk_reason": self.risk_reason,
+            "requires_auth_method": self.requires_auth_method,
+            "status": self.status,
+            "expires_at": self.expires_at.isoformat() if self.expires_at else None,
+            "created_at": self.created_at.isoformat(),
+        }
+
 
 class ApprovalReceipt:
     __slots__ = ("id", "approval_id", "approved_by", "decision", "scope",
@@ -374,6 +391,19 @@ class ApprovalReceipt:
         self.argument_hash = argument_hash
         self.expires_at = expires_at
         self.created_at = datetime.utcnow()
+
+    def to_dict(self) -> dict:
+        return {
+            "id": str(self.id),
+            "approval_id": str(self.approval_id),
+            "approved_by": str(self.approved_by),
+            "decision": self.decision,
+            "scope": self.scope,
+            "tool_name": self.tool_name,
+            "argument_hash": self.argument_hash,
+            "expires_at": self.expires_at.isoformat() if self.expires_at else None,
+            "created_at": self.created_at.isoformat(),
+        }
 
 
 # ---------------------------------------------------------------------------
