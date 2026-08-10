@@ -1,0 +1,196 @@
+"""Runs (inspect/cancel/resume), automations CRUD, and audit endpoints."""
+
+from __future__ import annotations
+
+import uuid
+from datetime import datetime
+
+import pytest
+
+from personal_ai_os.db.models import AuditEvent, Run, User
+from personal_ai_os.db.session import session_scope
+from personal_ai_os.gateway.services import ServiceContainer
+
+
+class FakeRunner:
+    def __init__(self):
+        self.cancelled: list = []
+        self.resumed: list = []
+
+    async def cancel(self, *, run_id):
+        self.cancelled.append(run_id)
+
+    async def resume(self, *, run_id):
+        self.resumed.append(run_id)
+
+
+async def _make_user(api_key: str) -> User:
+    async with session_scope() as s:
+        u = User(username=f"u{uuid.uuid4().hex[:8]}", api_key=api_key)
+        s.add(u)
+        await s.flush()
+        await s.refresh(u)
+        return u
+
+
+async def _make_run(owner_id, *, status: str = "running") -> Run:
+    async with session_scope() as s:
+        run = Run(owner_id=owner_id, status=status, input={"text": "hi"}, started_at=datetime.utcnow())
+        s.add(run)
+        await s.flush()
+        await s.refresh(run)
+        return run
+
+
+# ---------------------------------------------------------------------------
+# Runs
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_run_detail(make_api, db):
+    u = await _make_user("runs-key")
+    run = await _make_run(u.id, status="completed")
+    headers = {"X-API-Key": "runs-key"}
+
+    async with make_api(services=ServiceContainer()) as ac:
+        r = await ac.get(f"/v1/runs/{run.id}", headers=headers)
+        assert r.status_code == 200
+        body = r.json()
+        assert body["id"] == str(run.id)
+        assert body["status"] == "completed"
+        assert body["input"] == {"text": "hi"}
+        assert body["steps"] == []
+        assert body["tool_calls"] == []
+
+        missing = await ac.get(f"/v1/runs/{uuid.uuid4()}", headers=headers)
+        assert missing.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_run_cancel(make_api, db):
+    u = await _make_user("runs-key")
+    run = await _make_run(u.id, status="running")
+    runner = FakeRunner()
+    headers = {"X-API-Key": "runs-key"}
+
+    async with make_api(services=ServiceContainer(runner=runner)) as ac:
+        r = await ac.post(f"/v1/runs/{run.id}/cancel", headers=headers)
+        assert r.status_code == 200
+        assert r.json()["status"] == "cancelled"
+        assert runner.cancelled == [run.id]
+
+
+@pytest.mark.asyncio
+async def test_run_resume(make_api, db):
+    u = await _make_user("runs-key")
+    run = await _make_run(u.id, status="paused")
+    runner = FakeRunner()
+    headers = {"X-API-Key": "runs-key"}
+
+    async with make_api(services=ServiceContainer(runner=runner)) as ac:
+        r = await ac.post(f"/v1/runs/{run.id}/resume", json={}, headers=headers)
+        assert r.status_code == 200
+        assert r.json()["status"] == "running"
+        assert runner.resumed == [run.id]
+
+        # completed runs cannot be resumed
+        done = await _make_run(u.id, status="completed")
+        blocked = await ac.post(f"/v1/runs/{done.id}/resume", json={}, headers=headers)
+        assert blocked.status_code == 409
+
+
+@pytest.mark.asyncio
+async def test_run_owner_isolation(make_api, db):
+    u_a = await _make_user("a-key")
+    u_b = await _make_user("b-key")
+    run = await _make_run(u_a.id)
+
+    async with make_api(services=ServiceContainer()) as ac:
+        r = await ac.get(f"/v1/runs/{run.id}", headers={"X-API-Key": "b-key"})
+        assert r.status_code == 404
+        r = await ac.post(f"/v1/runs/{run.id}/cancel", headers={"X-API-Key": "b-key"})
+        assert r.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# Automations
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_automation_crud(make_api):
+    async with make_api(services=ServiceContainer()) as ac:
+        created = await ac.post(
+            "/v1/automations",
+            json={
+                "name": "Morning brief",
+                "trigger_type": "cron",
+                "trigger_config": {"cron": "0 8 * * *"},
+                "prompt": "Summarize my email",
+            },
+        )
+        assert created.status_code == 201, created.text
+        body = created.json()
+        assert body["name"] == "Morning brief"
+        assert body["status"] == "active"
+        aid = body["id"]
+
+        listing = await ac.get("/v1/automations")
+        assert listing.status_code == 200
+        assert aid in [a["id"] for a in listing.json()]
+
+        patched = await ac.patch(f"/v1/automations/{aid}", json={"enabled": False})
+        assert patched.status_code == 200
+        assert patched.json()["enabled"] is False
+
+        deleted = await ac.delete(f"/v1/automations/{aid}")
+        assert deleted.status_code == 200
+        assert deleted.json()["deleted"] is True
+
+        listing2 = await ac.get("/v1/automations")
+        assert aid not in [a["id"] for a in listing2.json()]
+
+
+@pytest.mark.asyncio
+async def test_automation_run_returns_501_without_scheduler(make_api):
+    async with make_api(services=ServiceContainer()) as ac:
+        aid = (
+            await ac.post("/v1/automations", json={"name": "x", "prompt": "do it"})
+        ).json()["id"]
+        r = await ac.post(f"/v1/automations/{aid}/run")
+        assert r.status_code == 501
+
+
+# ---------------------------------------------------------------------------
+# Audit
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_audit_list(make_api, db):
+    u = await _make_user("audit-key")
+    async with session_scope() as s:
+        s.add(
+            AuditEvent(
+                owner_id=u.id,
+                actor_type="user",
+                actor_id=str(u.id),
+                event_type="session.created",
+                resource_type="session",
+                details={"via": "test"},
+            )
+        )
+        await s.flush()
+
+    async with make_api(services=ServiceContainer()) as ac:
+        r = await ac.get("/v1/audit", params={"limit": 5}, headers={"X-API-Key": "audit-key"})
+        assert r.status_code == 200
+        events = r.json()
+        assert len(events) == 1
+        assert events[0]["event_type"] == "session.created"
+        assert events[0]["details"] == {"via": "test"}
+
+        # other user sees nothing
+        other = await ac.get("/v1/audit", headers={"X-API-Key": "dev-key"})
+        assert other.json() == []
