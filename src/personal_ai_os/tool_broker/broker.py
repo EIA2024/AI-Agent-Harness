@@ -55,11 +55,13 @@ class ToolBroker:
         credential_broker,
         connectors: dict | None = None,
         event_bus=None,
+        approval_engine=None,
         max_result_chars: int = 8000,
     ) -> None:
         self._registry = registry
         self._policy = policy_engine
         self._credentials = credential_broker
+        self._approval_engine = approval_engine
         # keyed by namespace / source / name prefix → Connector
         self._connectors: dict[str, Any] = dict(connectors or {})
         self._event_bus = event_bus
@@ -156,13 +158,33 @@ class ToolBroker:
                 arguments=arguments,
             )
         if decision.decision == "ask":
-            reason = "; ".join(decision.reasons) or "Approval required"
-            raise ApprovalRequiredError(
-                request_id=uuid4(),
-                tool_name=tool.name,
-                risk_level=tool.risk_level,
-                reason=reason,
-            )
+            # An approved execution carries an approval id in the context.
+            # Re-verification at the broker (the security boundary) is what
+            # prevents "approved A, executing B": the exact arguments must match
+            # the hash bound when the approval was resolved.
+            if context.approval_id is not None and self._approval_engine is not None:
+                verified = await self._approval_engine.verify_approval(
+                    context.approval_id, tool.name, arguments
+                )
+                if not verified:
+                    return await self._finish_failure(
+                        tool, context, started, err_code=ERR_DENIED,
+                        message=(
+                            "Approval does not match the requested arguments — "
+                            "executing B under approval for A is blocked"
+                        ),
+                        event=EventTypes.TOOL_DENIED, risk_level=decision.risk_level,
+                        arguments=arguments,
+                    )
+                # verified → proceed to execute below (bypass the ask)
+            else:
+                reason = "; ".join(decision.reasons) or "Approval required"
+                raise ApprovalRequiredError(
+                    request_id=uuid4(),
+                    tool_name=tool.name,
+                    risk_level=tool.risk_level,
+                    reason=reason,
+                )
 
         # 3. Credential injection -----------------------------------------
         try:
@@ -183,10 +205,18 @@ class ToolBroker:
                 event=EventTypes.TOOL_FAILED, arguments=arguments,
             )
 
+        # Secrets (injected under `_secrets`) must never reach the connector as
+        # regular arguments: strip the envelope before execution. A connector
+        # that legitimately needs credentials should consume them via a future
+        # dedicated channel on the execution context, never via arbitrary args.
+        exec_args = injected
+        if isinstance(exec_args, dict) and "_secrets" in exec_args:
+            exec_args = {k: v for k, v in exec_args.items() if k != "_secrets"}
+
         timeout = float(tool.timeout_seconds) if tool.timeout_seconds and tool.timeout_seconds > 0 else 30.0
         try:
             async with asyncio.timeout(timeout):
-                result = await connector.execute(tool.name, injected, context)
+                result = await connector.execute(tool.name, exec_args, context)
         except TimeoutError:
             result = ToolResult.fail(
                 error=f"Tool {tool_name!r} timed out after {timeout}s", error_code=ERR_TIMEOUT,
@@ -254,10 +284,13 @@ class ToolBroker:
             return ToolResult.fail(error=f"No connector registered for tool {tool_name!r}", error_code=ERR_NO_CONNECTOR)
 
         context = ToolExecutionContext(run_id=uuid4(), owner_id=owner_id)
+        exec_args = injected
+        if isinstance(exec_args, dict) and "_secrets" in exec_args:
+            exec_args = {k: v for k, v in exec_args.items() if k != "_secrets"}
         timeout = float(tool.timeout_seconds) if tool.timeout_seconds and tool.timeout_seconds > 0 else 30.0
         try:
             async with asyncio.timeout(timeout):
-                result = await connector.execute(tool.name, injected, context)
+                result = await connector.execute(tool.name, exec_args, context)
         except TimeoutError:
             result = ToolResult.fail(error=f"Tool {tool_name!r} timed out", error_code=ERR_TIMEOUT)
         except Exception as exc:
@@ -357,6 +390,28 @@ class ToolBroker:
                 error_col = {"code": result.error_code, "message": result.error}
 
             async with session_scope() as session:
+                # An approved execution carries an approval id: the awaiting_approval
+                # row created by the runtime must be updated, not duplicated.
+                if context.approval_id is not None:
+                    from sqlalchemy import select as _select
+
+                    pending = (
+                        await session.execute(
+                            _select(ToolCall).where(
+                                ToolCall.run_id == context.run_id,
+                                ToolCall.approval_id == context.approval_id,
+                            )
+                        )
+                    ).scalar_one_or_none()
+                    if pending is not None:
+                        pending.status = status
+                        pending.result = result_col
+                        pending.error = error_col
+                        pending.arguments = LogSanitizer.sanitize_dict(dict(arguments))
+                        pending.completed_at = None
+                        await session.flush()
+                        return
+
                 row = ToolCall(
                     run_id=context.run_id,
                     tool_name=tool.name,
@@ -366,6 +421,7 @@ class ToolBroker:
                     result=result_col,
                     error=error_col,
                     idempotency_key=context.idempotency_key or None,
+                    approval_id=context.approval_id,
                 )
                 session.add(row)
         except Exception as exc:  # noqa: BLE001

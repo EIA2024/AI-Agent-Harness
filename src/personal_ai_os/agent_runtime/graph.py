@@ -158,6 +158,7 @@ def _serialize_tool_result(result: Any, pending: Any, name: str, ctx: ToolExecut
             "tool_call_id": pending.get("id") if isinstance(pending, dict) else None,
             "tool_call": pending,
             "trust": "trusted_tool",
+            "idempotency_key": ctx.idempotency_key,
         }
     )
     if ctx.approval_id is not None:

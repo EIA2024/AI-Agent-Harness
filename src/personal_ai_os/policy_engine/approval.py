@@ -141,6 +141,30 @@ class ApprovalEngine:
             return False
         return receipt.argument_hash == compute_argument_hash(arguments)
 
+    async def verify_approval(self, approval_id: UUID, tool_name: str, arguments: dict) -> bool:
+        """Load a persisted approval by id and bind-check it against the exact
+        tool + arguments about to execute.
+
+        This is the execution-time guard: an approved request can only execute
+        the exact arguments whose hash was bound at resolution time (preventing
+        "approved A, executed B"). Non-approved statuses always fail closed.
+        """
+        async with session_scope() as session:
+            row = await session.get(Approval, approval_id)
+            if row is None:
+                return False
+            if row.status not in ("approved", "edited"):
+                return False
+            if row.expires_at is not None and datetime.utcnow() > row.expires_at:
+                return False
+            if row.tool_name != tool_name:
+                return False
+            if row.argument_hash is None:
+                # No hash bound at creation → bind now from the preview, so a
+                # call is only valid if it matches the original request.
+                return compute_argument_hash(arguments) == compute_argument_hash(row.arguments_preview or {})
+            return compute_argument_hash(arguments) == row.argument_hash
+
     # -- status helpers ----------------------------------------------------
 
     async def get_status(self, approval_id: UUID) -> str | None:

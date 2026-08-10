@@ -116,6 +116,7 @@ def build_default_services() -> ServiceContainer:
             credential_broker=container.credential_broker,
             connectors={c.connector_name: c for c in connectors},
             event_bus=container.event_bus,
+            approval_engine=container.approval_engine,
         )
 
     container.tool_broker = _lazy(_tool_broker)

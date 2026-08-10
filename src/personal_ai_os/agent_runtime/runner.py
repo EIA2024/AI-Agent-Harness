@@ -389,8 +389,13 @@ class RunRunner:
             seen.add(entry_id)
             success = bool(entry.get("success", True))
             approval_uuid = _coerce_uuid(entry["approval_id"]) if entry.get("approval_id") else None
+            idem_key = entry.get("idempotency_key")
 
-            # If this execution followed an approval, update the pending row.
+            # The ToolBroker already records one ToolCall row per execution.
+            # Find that row (by approval link for HITL flows) and update it.
+            # A row the broker already wrote (found by idempotency key) is
+            # left untouched — the broker's status is authoritative there.
+            existing: ToolCall | None = None
             if approval_uuid is not None:
                 existing = (
                     await session.execute(
@@ -400,11 +405,23 @@ class RunRunner:
                         )
                     )
                 ).scalar_one_or_none()
-                if existing is not None:
-                    existing.status = "completed" if success else "failed"
-                    existing.result = entry
-                    existing.error = {"code": entry.get("error_code"), "message": entry.get("error")} if not success else None
-                    existing.completed_at = _now()
+            if existing is not None:
+                existing.status = "completed" if success else "failed"
+                existing.result = entry if success else None
+                existing.error = {"code": entry.get("error_code"), "message": entry.get("error")} if not success else None
+                existing.completed_at = _now()
+                continue
+            if idem_key:
+                broker_row = (
+                    await session.execute(
+                        select(ToolCall).where(
+                            ToolCall.run_id == run_id,
+                            ToolCall.idempotency_key == idem_key,
+                        )
+                    )
+                ).scalar_one_or_none()
+                if broker_row is not None:
+                    # Already recorded by the broker with full status semantics.
                     continue
 
             session.add(
@@ -417,7 +434,7 @@ class RunRunner:
                     status="completed" if success else "failed",
                     result=entry if success else None,
                     error={"code": entry.get("error_code"), "message": entry.get("error")} if not success else None,
-                    idempotency_key=entry.get("idempotency_key"),
+                    idempotency_key=idem_key,
                 )
             )
 
@@ -440,10 +457,14 @@ class RunRunner:
             if isinstance(function, dict):
                 import json
 
-                try:
-                    arguments = json.loads(function.get("arguments") or "{}")
-                except Exception:
-                    arguments = {}
+                raw_args = function.get("arguments")
+                if isinstance(raw_args, dict):
+                    arguments = raw_args
+                elif isinstance(raw_args, str):
+                    try:
+                        arguments = json.loads(raw_args or "{}")
+                    except Exception:
+                        arguments = {}
 
             existing = await session.get(Approval, approval_uuid)
             if existing is None:
