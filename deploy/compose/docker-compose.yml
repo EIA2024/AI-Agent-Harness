@@ -1,0 +1,42 @@
+version: "3.8"
+
+# Personal AI OS — local / personal-server deployment (blueprint §58-§60).
+# Mode B (personal server): api + postgres. Web frontend can be added later.
+
+services:
+  api:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile.api
+    ports:
+      - "${API_PORT:-8000}:8000"
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://user:pass@postgres:5432/personal_ai_os
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - PERSONAL_AI_API_KEY=${PERSONAL_AI_API_KEY:-dev-key}
+    volumes:
+      - ./data:/app/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_DB: personal_ai_os
+      POSTGRES_USER: user
+      POSTGRES_PASSWORD: pass
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U user -d personal_ai_os"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
