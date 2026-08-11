@@ -1,25 +1,36 @@
+<div align="center">
+
 # Personal AI OS
 
-一个**长期运行、拥有持久身份与记忆、能够安全调用外部能力、可暂停/恢复任务、可主动执行工作、并且所有重要行为都可审计的个人 Agent Runtime**。
+**一个长期运行、拥有持久身份与记忆、可安全调用外部能力、可暂停/恢复任务、可主动执行、所有重要行为可审计的个人 Agent Runtime。**
 
-完整设计见 [Personal_AI_OS_Development_Blueprint_v1.md](Personal_AI_OS_Development_Blueprint_v1.md)，部门工作指南见 [docs/dept/](docs/dept/)。
+Python · FastAPI · LangGraph · SQLAlchemy · PostgreSQL / SQLite
 
-## 架构概览
+</div>
 
-```
-User → Gateway/Session → Agent Runtime (LangGraph)
-                              ├── Context Engine ──→ Model Gateway (multi-provider)
-                              ├── Tool Broker ──→ Policy/Approval ──→ Connectors
-                              ├── Memory Engine (provenance + hybrid retrieval)
-                              └── durable Run state (Postgres / SQLite)
-```
+---
 
-- **Runtime**：LangGraph 状态机（intake → context → decide → tool → respond → memory commit），支持 HITL 审批与恢复
-- **安全**：Policy Engine（R0-R4 风险分级）→ Approval（参数 hash 绑定）→ Credential Broker（Secret 隔离注入）
-- **记忆**：五层记忆，带 provenance（来源追踪），混合检索（关键词 + 语义 + 加权）
-- **模型无关**：ModelProvider 抽象 + 路由 + failover + 成本记录
+## ✨ 特性
+
+- **Agent Runtime** — LangGraph 状态机（`intake → context → decide → tool → respond → memory`），任务分类 L0–L4，HITL 审批，durable Run 持久化，SSE 实时流式输出。
+- **🔐 安全优先** — R0–R4 策略引擎、审批参数 hash 绑定（"批准 A 执行 B"被阻断）、凭据隔离注入、trust 标签防注入、无界工具循环守卫。
+- **🧠 上下文工程** — 4 层 Prompt 组装 + token 预算 + **MemGPT 风格对话压缩**（近期完整 + 历史摘要），"在当前 context 能力下尽量保留对话记忆"。
+- **📦 模型无关** — Anthropic + OpenAI 兼容（OpenAI / DeepSeek / Moonshot / GLM / Qwen / Ollama），多套本地 Provider 配置一键切换，failover，成本记录。
+- **🔌 工具系统** — 单一 ToolBroker 执行路径；内置 calculator（安全求值）、filesystem（路径隔离）、http_fetch（SSRF 防护 + HTML→文本）。
+- **🖥️ 终端体验** — CLI 流式打字机输出、思维链灰显、工具调用实时宣布（参考 Codex / Kimi / GLM 风格）。
+
+## 📚 文档
+
+| 文档 | 说明 |
+|---|---|
+| [架构](docs/ARCHITECTURE.md) | 系统设计、模块职责、数据流、安全模型 |
+| [API 参考](docs/API.md) | 全部 REST 端点 + SSE 事件 |
+| [快速开始](#快速开始) | 5 分钟跑起来 |
+| [开发指南](CONTRIBUTING.md) | 贡献规范与设计约束 |
 
 ## 快速开始
+
+需要 **Python 3.12+** 与 [uv](https://docs.astral.sh/uv/)。
 
 ```bash
 # 1. 安装依赖
@@ -27,14 +38,14 @@ uv sync --extra dev
 
 # 2. 配置 LLM Provider（OpenAI/Anthropic/DeepSeek/...，支持多套切换）
 uv run python -m apps.cli.main config init
-#    → 交互式向导：选择请求格式（OpenAI 兼容 / Anthropic）、Base URL、API Key、模型
-#    → 配置保存在 ~/.personal_ai/profiles.json（仓库外，不会进入 git）
+#    → 交互式向导：请求格式（OpenAI 兼容 / Anthropic）→ Base URL → API Key → 模型
+#    → 配置保存在 ~/.personal_ai/profiles.json（仓库外，密钥不进 git）
 
-# 3. 启动 API（默认 SQLite）
+# 3. 启动 API（默认本地 SQLite）
 uv run python -m apps.api.main
-# → http://localhost:8000  (docs at /docs)
+# → http://localhost:8000   （交互式文档 /docs）
 
-# 4. 使用 CLI 对话（另开终端）
+# 4. 另开终端，用 CLI 对话
 export PERSONAL_AI_API_URL=http://localhost:8000
 export PERSONAL_AI_API_KEY=dev-key
 uv run python -m apps.cli.main chat
@@ -53,55 +64,72 @@ uv run python -m apps.cli.main config remove <name> # 删除
 # 切换后重启 API 服务生效
 ```
 
-支持的格式：`openai`（OpenAI / DeepSeek / Moonshot / GLM / Qwen / Ollama 等任何 chat-completions 兼容服务）与 `anthropic`（Claude 官方）。
+## 环境变量
 
-### 记忆与 Provider 切换（调研结论）
-**切换聊天模型（OpenAI ⇄ Anthropic ⇄ DeepSeek 等）不会丢失任何记忆。** 长期记忆存储在本地数据库（`memories` 表）的 `memories`/`memory_links` 表，与 LLM 厂商无关——换 Provider 只是换"大脑"，记忆仍在。
+| 变量 | 必需 | 说明 |
+|---|---|---|
+| `ANTHROPIC_API_KEY` | 否（用 `config init` 更佳） | Anthropic 密钥（legacy 回退） |
+| `PERSONAL_AI_DEV_API_KEY` | 服务器访问 | 开发模式访问密钥，客户端 `X-API-Key` 匹配 |
+| `DATABASE_URL` | 否 | PostgreSQL URL；缺省用本地 SQLite（`data/app.db`） |
+| `PERSONAL_AI_CONFIG_DIR` | 否 | Provider 配置目录（默认 `~/.personal_ai`） |
+| `PERSONAL_AI_API_URL` / `PERSONAL_AI_API_KEY` | CLI | 默认已匹配本地，通常不用设 |
 
-一个需要了解的细节是**嵌入向量**：检索用向量做相似度排序。本系统 MVP 用**确定性哈希嵌入**（不依赖任何外部 API，可复现），因此切换 Provider 完全无影响。若未来接入真实嵌入模型，需注意**不同嵌入模型的向量空间不兼容**——切换嵌入模型需对存量记忆重嵌入（行业共识，见 [Qdrant 嵌入迁移指南](https://qdrant.tech/documentation/tutorials-operations/embedding-model-migration/)、[Mixpeek 嵌入可移植性](https://mixpeek.com/guides/embedding-portability-versioning)）。因当前不持久化向量、检索时实时计算，切换不会损坏数据，只是相似度口径可能变化。
+## 记忆与 Provider 切换
 
-**结论：记忆在 Provider 之间完全共享；切换聊天 API 是安全的。**
+**切换聊天模型（OpenAI ⇄ Anthropic ⇄ DeepSeek 等）不会丢失任何记忆。** 长期记忆存于本地数据库，与 LLM 厂商无关。嵌入向量用确定性哈希（不依赖外部 API），切换完全无影响；未来若接真实嵌入模型，需注意不同模型向量空间不兼容（需重嵌入）。
 
-### 对话上下文工程（MemGPT 风格压缩）
+**对话上下文** 采用 MemGPT 式 compaction：近期对话保留完整，更早对话压缩为运行摘要常驻上下文（详见 [架构文档](docs/ARCHITECTURE.md#42-conversation-memory-memgpt-style-compaction)）。
 
-同一会话内跨消息的记忆采用 **MemGPT/Letta 式 compaction**（参考 [Letta compaction](https://docs.letta.com/v1-sdk/messages/compaction) 与 Claude Code 的 condense 机制）：
+## Docker 部署
 
-- **近期对话**：最新若干轮保留完整原文（token 预算约 6000，超出按预算截断）
-- **历史摘要**：比近期窗口更早的对话被**压缩成运行摘要**（`[更早的对话摘要]` 注入为 system 帧），而不是丢弃——因此"在当前 context 能力下尽量保留对话记忆"
-- **生命周期**：每次 Run 完成后，若会话总长度超出窗口预算，最旧的溢出部分由模型总结并合并进摘要，写回 `session.context`；新 Run 启动时同时加载摘要 + 近期窗口
-- 两层都受上下文预算管理（`conversation_summary` 6% + `conversation` 19%）
+```bash
+docker compose -f deploy/compose/docker-compose.yml up
+# api:8000 + postgres(pgvector):5432
+```
 
 ## 运行测试
 
 ```bash
-uv run pytest -v
+uv run pytest -v          # 300+ tests（SQLite 内存）
+uv run ruff check src connectors apps tests
+bash scripts/smoke.sh     # 端到端冒烟
 ```
 
 ## 仓库布局
 
 ```text
-apps/                     # API (FastAPI)、CLI
-src/personal_ai_os/
-  agent_runtime/          # LangGraph 状态机、Run 生命周期
-  context_engine/         # Prompt 分层组装、上下文预算
-  model_gateway/          # 模型抽象、路由、failover、成本
-  policy_engine/          # 策略引擎、审批引擎、凭据代理
-  tool_broker/            # 工具注册表、执行代理
-  memory_engine/          # 记忆存储、混合检索、抽取
-  gateway/                # 会话路由
-  scheduler/              # 事件总线、自动化
-  observability/          # 审计日志
-  common/                 # 跨部门契约（模型、协议、工具）
-  db/                     # SQLAlchemy ORM + 会话工厂
+apps/                     # API (FastAPI, REST+SSE) / CLI（流式）
 connectors/               # 原生连接器（calculator/filesystem/http_fetch）
+src/personal_ai_os/
+  agent_runtime/          # LangGraph 状态机 + Run 生命周期 + 实时流
+  context_engine/         # 4 层 Prompt + 预算 + 对话摘要压缩
+  model_gateway/          # 模型 Provider/路由/配置/成本
+  policy_engine/          # R0–R4 策略 + 审批 + 凭据
+  tool_broker/            # 工具注册表 + 唯一执行路径
+  memory_engine/          # 记忆持久化 + 混合检索 + 抽取
+  gateway/                # 会话路由 + 依赖注入
+  scheduler/              # 事件总线
+  observability/          # 审计日志 + Eval
+  common/                 # 跨部门契约（模型/协议/工具）
+  db/                     # SQLAlchemy ORM + 会话工厂
 migrations/               # Alembic
-docs/dept/                # 部门工作指南
+deploy/                   # Docker Compose / Dockerfile
+docs/                     # 架构/API/部门工作指南/ADR
+evals/                    # 评估数据集
 ```
 
 ## 安全约束（不可协商）
 
 1. Agent 不直接持有权限，一切能力调用经过 Tool Broker
-2. 所有副作用操作经过 Policy（R3+ 需人工审批）
-3. 长期记忆必须携带 provenance
+2. 所有副作用操作经过 Policy（R3+ 需人工审批，参数 hash 绑定）
+3. 长期记忆必须携带 provenance（来源追踪）
 4. Prompt 不是安全边界，安全边界在 Tool Broker / Policy
 5. 外部内容默认 untrusted（标记为数据而非指令）
+
+## License
+
+[MIT](LICENSE)
+
+## 致谢
+
+设计参考了 LangGraph、Letta/MemGPT（compaction）、OpenClaw、Hermes、MCP 规范等优秀开源 Agent 工程。
