@@ -59,6 +59,10 @@ class RuntimeState(AgentState, total=False):
     context: dict
     pending_response: dict
     final_response: str
+    #: chain-of-thought from the latest model turn (DeepSeek reasoning, etc.)
+    thinking: str
+    #: cached context build from build_context (avoids rebuilds in decide)
+    _cached_context: dict
 
 
 # ---------------------------------------------------------------------------
