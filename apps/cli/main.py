@@ -32,10 +32,13 @@ API_KEY = os.environ.get("PERSONAL_AI_API_KEY", "dev-key")
 class APIClient:
     """Thin sync HTTP client for the Personal AI OS REST API."""
 
-    def __init__(self, base_url: str | None = None, api_key: str | None = None):
+    def __init__(self, base_url: str | None = None, api_key: str | None = None,
+                 timeout: float = 300.0):
+        # 300s: reasoning models (e.g. DeepSeek v4-flash) can "think" for a
+        # while, and a tool loop makes several model calls before replying.
         self.base_url = (base_url or API_URL).rstrip("/")
         self.api_key = api_key or API_KEY
-        self._http = httpx.Client(timeout=60)
+        self._http = httpx.Client(timeout=timeout)
 
     def request(self, method: str, path: str, **kwargs) -> dict:
         kwargs.setdefault("headers", {"X-API-Key": self.api_key})
