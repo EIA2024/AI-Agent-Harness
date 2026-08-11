@@ -208,7 +208,7 @@ class AnthropicProvider:
         system, messages = split_system_and_messages(request.messages)
         kwargs: dict[str, Any] = {
             "model": model,
-            "max_tokens": request.max_tokens or 1024,
+            "max_tokens": request.max_tokens or 4096,
             "messages": to_anthropic_messages(messages),
         }
         if system:
@@ -342,11 +342,16 @@ class OpenAICompatibleProvider:
         api_key: str,
         base_url: str = "https://api.openai.com/v1",
         default_model: str = "gpt-4o-mini",
+        default_max_tokens: int = 4096,
         transport: httpx.AsyncBaseTransport | None = None,
     ):
         self.api_key = api_key
         self.base_url = base_url.rstrip("/")
         self.default_model = default_model
+        # Reasoning models (DeepSeek v4, Qwen, ...) count chain-of-thought
+        # tokens against max_tokens; 1024 is far too small and truncates the
+        # answer. 4096 leaves room for thinking + the actual reply.
+        self.default_max_tokens = default_max_tokens
         self._transport = transport
 
     def _headers(self) -> dict:
@@ -359,7 +364,7 @@ class OpenAICompatibleProvider:
         payload: dict[str, Any] = {
             "model": model,
             "messages": _sanitize_messages(request.messages),
-            "max_tokens": request.max_tokens or 1024,
+            "max_tokens": request.max_tokens or self.default_max_tokens,
         }
         if stream:
             payload["stream"] = True

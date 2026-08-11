@@ -53,6 +53,7 @@ class ProviderProfile:
     api_key: str = ""
     base_url: str = ""
     model: str = ""
+    max_tokens: int = 0  # 0 → provider default (4096 for reasoning models)
     created_at: str = ""
     updated_at: str = ""
     extra: dict = field(default_factory=dict)

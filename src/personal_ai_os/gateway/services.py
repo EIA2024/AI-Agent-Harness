@@ -141,6 +141,7 @@ def build_default_services() -> ServiceContainer:
                     api_key=profile.api_key,
                     base_url=profile.base_url or "https://api.openai.com/v1",
                     default_model=profile.model or "gpt-4o-mini",
+                    default_max_tokens=profile.max_tokens or 4096,
                 )
                 logger.info(
                     "Using provider profile %r (%s, %s)",

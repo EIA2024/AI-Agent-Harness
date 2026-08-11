@@ -91,6 +91,38 @@ class RunRunner:
 
     # ------------------------------------------------------------------ start
 
+    async def _load_session_history(
+        self, session_id, owner_id, exclude_run_id: uuid.UUID | None = None, limit: int = 30
+    ) -> list[dict]:
+        """Load the session's prior user/assistant turns for LLM context.
+
+        Each run is stateless, so a new run in an existing session must be
+        seeded with the conversation history (blueprint §6: the session owns the
+        conversation history reference). Tool-call frames and empty assistant
+        frames are skipped; the context engine's budget truncates as needed.
+        """
+        async with session_scope() as session:
+            stmt = (
+                select(Message)
+                .where(
+                    Message.session_id == session_id,
+                    Message.owner_id == owner_id,
+                )
+                .order_by(Message.created_at.desc())
+                .limit(limit)
+            )
+            rows = list((await session.execute(stmt)).scalars().all())
+        history: list[dict] = []
+        for m in reversed(rows):
+            if exclude_run_id is not None and m.run_id == exclude_run_id:
+                continue
+            if m.role not in ("user", "assistant"):
+                continue
+            if m.role == "assistant" and not (m.content or "").strip():
+                continue  # tool-call-only frames are not conversation
+            history.append({"role": m.role, "content": m.content or ""})
+        return history
+
     async def _init_run(self, *, session_id, owner_id, user_input, agent_id=None):
         """Create the Run + user Message rows; return (run_id, initial_state)."""
         run_id = uuid.uuid4()
@@ -139,13 +171,14 @@ class RunRunner:
                 )
             )
 
+        history = await self._load_session_history(session_uuid, owner_uuid, exclude_run_id=run_id)
         initial: dict = {
             "run_id": str(run_id),
             "session_id": str(session_uuid),
             "owner_id": str(owner_uuid),
             "agent_id": str(agent_uuid) if agent_uuid else None,
             "user_input": user_input,
-            "messages": [],
+            "messages": history,
             "context_items": [],
             "task": {},
             "plan": [],
@@ -160,7 +193,9 @@ class RunRunner:
             "model_usage": {},
         }
         self._persisted_tool_ids[str(run_id)] = set()
-        self._persisted_message_count[str(run_id)] = 1  # the user message above
+        # state.messages starts with the loaded history (already in the DB);
+        # only messages added after this point (assistant replies) are new.
+        self._persisted_message_count[str(run_id)] = len(history)
         return run_id, initial
 
     async def start(
