@@ -56,12 +56,20 @@ uv run python -m apps.cli.main config remove <name> # 删除
 支持的格式：`openai`（OpenAI / DeepSeek / Moonshot / GLM / Qwen / Ollama 等任何 chat-completions 兼容服务）与 `anthropic`（Claude 官方）。
 
 ### 记忆与 Provider 切换（调研结论）
-
 **切换聊天模型（OpenAI ⇄ Anthropic ⇄ DeepSeek 等）不会丢失任何记忆。** 长期记忆存储在本地数据库（`memories` 表）的 `memories`/`memory_links` 表，与 LLM 厂商无关——换 Provider 只是换"大脑"，记忆仍在。
 
 一个需要了解的细节是**嵌入向量**：检索用向量做相似度排序。本系统 MVP 用**确定性哈希嵌入**（不依赖任何外部 API，可复现），因此切换 Provider 完全无影响。若未来接入真实嵌入模型，需注意**不同嵌入模型的向量空间不兼容**——切换嵌入模型需对存量记忆重嵌入（行业共识，见 [Qdrant 嵌入迁移指南](https://qdrant.tech/documentation/tutorials-operations/embedding-model-migration/)、[Mixpeek 嵌入可移植性](https://mixpeek.com/guides/embedding-portability-versioning)）。因当前不持久化向量、检索时实时计算，切换不会损坏数据，只是相似度口径可能变化。
 
 **结论：记忆在 Provider 之间完全共享；切换聊天 API 是安全的。**
+
+### 对话上下文工程（MemGPT 风格压缩）
+
+同一会话内跨消息的记忆采用 **MemGPT/Letta 式 compaction**（参考 [Letta compaction](https://docs.letta.com/v1-sdk/messages/compaction) 与 Claude Code 的 condense 机制）：
+
+- **近期对话**：最新若干轮保留完整原文（token 预算约 6000，超出按预算截断）
+- **历史摘要**：比近期窗口更早的对话被**压缩成运行摘要**（`[更早的对话摘要]` 注入为 system 帧），而不是丢弃——因此"在当前 context 能力下尽量保留对话记忆"
+- **生命周期**：每次 Run 完成后，若会话总长度超出窗口预算，最旧的溢出部分由模型总结并合并进摘要，写回 `session.context`；新 Run 启动时同时加载摘要 + 近期窗口
+- 两层都受上下文预算管理（`conversation_summary` 6% + `conversation` 19%）
 
 ## 运行测试
 
