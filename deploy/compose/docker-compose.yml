@@ -1,5 +1,3 @@
-version: "3.8"
-
 # Personal AI OS — local / personal-server deployment (blueprint §58-§60).
 # Mode B (personal server): api + postgres. Web frontend can be added later.
 
