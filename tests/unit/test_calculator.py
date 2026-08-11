@@ -138,3 +138,13 @@ def test_safe_evaluate_raises_value_error_on_attack():
         safe_evaluate("__import__('os').system('x')")
     with pytest.raises(ValueError):
         safe_evaluate("1; import os")
+
+
+def test_power_with_caret():
+    """`^` is a common power convention (models write `4^2`); it must work."""
+    from connectors.calculator.connector import safe_evaluate
+
+    assert safe_evaluate("4^2") == 16.0
+    assert safe_evaluate("2 ^ 3") == 8.0
+    assert safe_evaluate("sqrt(4^2 - 3^2)/4") == pytest.approx(0.6614378277661477)
+    assert safe_evaluate("2 ** 3") == 8.0  # Python-native power still works

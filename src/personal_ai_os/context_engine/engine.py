@@ -241,16 +241,29 @@ class ContextEngine:
 
     def _tier3_conversation(self, state: dict, budget: ContextBudget) -> list[dict]:
         history = state.get("messages") or []
-        # skip tool-call-only assistant frames (content is None) and tool frames
-        history = [
+        # Preserve the natural interleaved order from the runtime: an assistant
+        # tool-call frame must stay adjacent to its tool result, otherwise
+        # OpenAI-compatible endpoints (DeepSeek in particular) reject the turn
+        # ("tool must be a response to a preceding message with tool_calls").
+        # Keep user/assistant/system/tool roles in order; the tool_results
+        # budget is folded in here (see _tier4_tool_results).
+        kept = [
             m for m in history
-            if isinstance(m, dict)
-            and m.get("role") in ("user", "assistant", "system")
-            and m.get("content")
+            if isinstance(m, dict) and m.get("role") in ("user", "assistant", "system", "tool")
         ]
-        return self._fit_tail(history[-10:], budget.token_limit("conversation"))
+        budget_total = budget.token_limit("conversation") + budget.token_limit("tool_results")
+        return self._fit_tail(kept[-10:], budget_total)
 
     def _tier4_tool_results(self, state: dict, budget: ContextBudget) -> list[dict]:
+        # In the real flow the runtime (observe) already folds tool frames into
+        # state.messages right after their assistant tool-call frame, and the
+        # conversation tier passes them through in that adjacency-preserving
+        # order. Re-adding them here would break the required adjacency. Only
+        # when messages carry no tool frames (standalone / first turn) do we
+        # synthesize them from tool_results.
+        if any(isinstance(m, dict) and m.get("role") == "tool" for m in (state.get("messages") or [])):
+            return []
+
         results = state.get("tool_results") or []
         messages: list[dict] = []
         for tr in results[-5:]:

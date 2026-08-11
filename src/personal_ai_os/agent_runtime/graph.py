@@ -436,7 +436,12 @@ async def observe(state: AgentState, deps: _Deps) -> dict:
     messages = list(state.get("messages") or [])
     tool_call = latest.get("tool_call")
     if tool_call:
-        messages.append({"role": "assistant", "content": None, "tool_calls": [tool_call]})
+        assistant_frame: dict = {"role": "assistant", "content": None, "tool_calls": [tool_call]}
+        # Preserve the provider's reasoning content (DeepSeek reasoning models
+        # require it to be passed back verbatim on replay).
+        if isinstance(tool_call, dict) and tool_call.get("reasoning_content"):
+            assistant_frame["reasoning_content"] = tool_call["reasoning_content"]
+        messages.append(assistant_frame)
     messages.append(
         {
             "role": "tool",

@@ -397,6 +397,14 @@ class OpenAICompatibleProvider:
                 response = await client.post(
                     f"{self.base_url}/chat/completions", json=payload, headers=self._headers()
                 )
+                if response.status_code >= 400:
+                    # surface the provider's own error message (e.g. DeepSeek's
+                    # schema/validation details) instead of a bare status code
+                    body = response.text[:500]
+                    raise ModelError(
+                        f"OpenAI-compatible endpoint returned HTTP {response.status_code} "
+                        f"for model {model!r}: {body}"
+                    )
                 response.raise_for_status()
                 data = response.json()
         except ModelError:
@@ -415,6 +423,14 @@ class OpenAICompatibleProvider:
                     fn = tc.get("function")
                     if isinstance(fn, dict) and fn.get("name") in name_map:
                         fn["name"] = name_map[fn["name"]]
+        # DeepSeek reasoning models require `reasoning_content` to be passed back
+        # verbatim when the assistant's tool-call frame is replayed next turn.
+        # Stash it on the tool_call dict so the runtime can persist it.
+        reasoning = message.get("reasoning_content")
+        if reasoning and tool_calls:
+            for tc in tool_calls:
+                if isinstance(tc, dict):
+                    tc["reasoning_content"] = reasoning
 
         usage_raw = data.get("usage") or {}
         cached_tokens = 0

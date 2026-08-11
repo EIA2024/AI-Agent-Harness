@@ -96,6 +96,11 @@ def safe_evaluate(expression: str) -> float:
         raise ValueError("expression must be a non-empty string")
     if "__" in expression:
         raise ValueError("dunder access is not allowed")
+    # Many models/users write `^` for power (e.g. `4^2`). Python parses `^` as
+    # XOR, so normalize it to `**` before parsing. Safe here because the
+    # evaluator only accepts numeric literals and whitelisted operators — any
+    # `^` in such an expression can only be intended as exponentiation.
+    expression = expression.replace("^", "**")
     try:
         tree = ast.parse(expression, mode="eval")
     except SyntaxError as exc:
@@ -119,8 +124,8 @@ class CalculatorConnector:
             namespace="calculator",
             description=(
                 "Evaluate a safe arithmetic expression and return the numeric result. "
-                "Supports + - * / ** (power), parentheses, and the math functions "
-                "sin, cos, tan, sqrt, log, abs."
+                "Supports + - * / ** and ^ (both mean power), parentheses, and the "
+                "math functions sin, cos, tan, sqrt, log, abs."
             ),
             input_schema={
                 "type": "object",
