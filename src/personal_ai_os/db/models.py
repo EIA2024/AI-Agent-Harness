@@ -15,6 +15,7 @@ from sqlalchemy import (
     DateTime,
     Float,
     ForeignKey,
+    Index,
     Integer,
     String,
     Text,
@@ -90,6 +91,11 @@ class Project(Base):
 
 class Session(Base):
     __tablename__ = "sessions"
+    # Note: a partial unique index on (owner_id, channel, external_conversation_id)
+    # WHERE status='active' AND external_conversation_id IS NOT NULL should be
+    # added via Alembic migration to close the SELECT-then-INSERT race in
+    # SessionRouter.get_or_create. SQLite's NULL handling in UNIQUE constraints
+    # makes declarative partial indexes unwieldy, so rely on the DB migration.
 
     id: Mapped[uuid.UUID] = _uuid_pk()
     owner_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"))

@@ -137,6 +137,7 @@ class HttpFetchConnector:
             timeout_seconds=int(MAX_TIMEOUT),
             retry_policy="once",
             tags=["http", "web", "fetch"],
+            result_trust="untrusted_web",
         )
 
     async def list_tools(self) -> list[ToolDescriptor]:

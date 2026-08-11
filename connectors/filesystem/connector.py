@@ -231,21 +231,29 @@ class FilesystemConnector:
             return ToolResult.fail(error=f"not a directory: {path}", error_code="DIRECTORY_NOT_FOUND")
 
         entries: list[dict] = []
+        root = os.path.normcase(os.path.realpath(self.allowed_root))
 
         def walk(directory: str, depth: int) -> None:
             for name in sorted(os.listdir(directory)):
                 full = os.path.join(directory, name)
+                # Defend against symlink escapes: resolve the real path and
+                # confirm it stays inside the allowed root. Skip entries that
+                # don't (prevents listing files/dirs outside the jail).
+                real_full = os.path.realpath(full)
+                if os.path.commonpath([root, os.path.normcase(real_full)]) != root:
+                    continue
                 is_dir = os.path.isdir(full)
+                basename = os.path.basename(real_full)
                 entries.append(
                     {
                         "name": name,
-                        "path": os.path.relpath(full, self.allowed_root),
+                        "path": os.path.relpath(real_full, self.allowed_root),
                         "is_dir": is_dir,
-                        "size_bytes": os.path.getsize(full) if not is_dir else None,
+                        "size_bytes": os.path.getsize(real_full) if not is_dir else None,
                     }
                 )
                 if is_dir and recursive and depth < max_depth:
-                    walk(full, depth + 1)
+                    walk(real_full, depth + 1)
 
         walk(resolved, 0)
         return ToolResult.ok(data={"path": path, "entries": entries}, text=f"{len(entries)} entries")
@@ -262,23 +270,28 @@ class FilesystemConnector:
         except re.error as exc:
             return ToolResult.fail(error=f"invalid search pattern: {exc}", error_code="FILESYSTEM_ERROR")
 
+        root = os.path.normcase(os.path.realpath(self.allowed_root))
         matches: list[dict] = []
-        for root, _dirs, files in os.walk(resolved):
+        for dirpath, _dirs, files in os.walk(resolved):
             for fname in files:
                 if self._is_sensitive(fname):
                     continue
-                full = os.path.join(root, fname)
-                if not os.path.isfile(full):
+                full = os.path.join(dirpath, fname)
+                # Resolve symlinks and verify containment before opening.
+                real_full = os.path.realpath(full)
+                if os.path.commonpath([root, os.path.normcase(real_full)]) != root:
+                    continue
+                if not os.path.isfile(real_full):
                     continue
                 try:
-                    if os.path.getsize(full) > self.max_file_size:
+                    if os.path.getsize(real_full) > self.max_file_size:
                         continue
-                    with open(full, encoding="utf-8", errors="replace") as fh:
+                    with open(real_full, encoding="utf-8", errors="replace") as fh:
                         for lineno, line in enumerate(fh, 1):
                             if compiled.search(line):
                                 matches.append(
                                     {
-                                        "file": os.path.relpath(full, self.allowed_root),
+                                        "file": os.path.relpath(real_full, self.allowed_root),
                                         "line": lineno,
                                         "content": line.rstrip("\n")[:200],
                                     }

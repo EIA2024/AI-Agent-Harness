@@ -22,28 +22,37 @@ async def resolve_user(
 ) -> User:
     """Resolve the authenticated owner from the ``X-API-Key`` header.
 
-    When the header is missing the development key is used, which maps to the
-    ``owner`` user created by the app lifespan. An unrecognized key is a 401.
+    A missing header always 401s — there is no silent fallback. The development
+    key (``PERSONAL_AI_DEV_API_KEY``) only works when the env var is explicitly
+    set *and* the client sends it in the header.
     """
-    key = x_api_key if x_api_key else config.DEV_API_KEY
+    if not x_api_key:
+        raise HTTPException(status_code=401, detail="Missing API key")
     async with session_scope() as session:
-        result = await session.execute(select(User).where(User.api_key == key))
+        result = await session.execute(select(User).where(User.api_key == x_api_key))
         user = result.scalar_one_or_none()
         if user is None:
-            raise HTTPException(status_code=401, detail="Invalid or missing API key")
+            raise HTTPException(status_code=401, detail="Invalid API key")
         return user
 
 
-async def ensure_dev_owner() -> User:
-    """Create the development ``owner`` user (idempotent). Called on startup."""
+async def ensure_dev_owner() -> User | None:
+    """Create the development ``owner`` user (idempotent). Called on startup.
+
+    Only creates the dev user when ``PERSONAL_AI_DEV_API_KEY`` is explicitly set.
+    Returns the user if created/found, or ``None`` when dev mode is disabled.
+    """
+    dev_key = config.DEV_API_KEY
+    if not dev_key:
+        return None
     async with session_scope() as session:
-        result = await session.execute(select(User).where(User.api_key == config.DEV_API_KEY))
+        result = await session.execute(select(User).where(User.api_key == dev_key))
         user = result.scalar_one_or_none()
         if user is None:
             user = User(
                 username=config.DEV_USERNAME,
                 display_name="Dev Owner",
-                api_key=config.DEV_API_KEY,
+                api_key=dev_key,
             )
             session.add(user)
             await session.flush()

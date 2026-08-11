@@ -15,12 +15,16 @@ Design rules (from blueprint §8 / department 08):
 from __future__ import annotations
 
 import asyncio
-from collections import defaultdict
+import logging
+from collections import defaultdict, deque
 from collections.abc import Awaitable, Callable
 
 from personal_ai_os.common.models import DomainEvent
 
 Handler = Callable[[DomainEvent], Awaitable[None]]
+logger = logging.getLogger(__name__)
+
+_MAX_STORED_ERRORS = 1000
 
 
 class EventBus:
@@ -36,9 +40,9 @@ class EventBus:
 
     def __init__(self) -> None:
         self._subscribers: dict[str, list[Handler]] = defaultdict(list)
-        # Swallowed handler errors are recorded here so tests / observability
-        # can assert on isolation behaviour.
-        self._handler_errors: list[tuple[str, BaseException]] = []
+        # Bounded deque so long-running processes don't leak memory from
+        # accumulated handler failures. Oldest errors are dropped when full.
+        self._handler_errors: deque[tuple[str, BaseException]] = deque(maxlen=_MAX_STORED_ERRORS)
 
     def subscribe(self, event_type: str, handler: Handler) -> None:
         """Register ``handler`` to be invoked for every event of ``event_type``."""
@@ -74,6 +78,12 @@ class EventBus:
         for handler, result in zip(snapshot, results, strict=False):
             if isinstance(result, BaseException):
                 self._handler_errors.append((event.type, result))
+                logger.warning(
+                    "Event handler %r failed for event %s: %s",
+                    getattr(handler, "__name__", handler),
+                    event.type,
+                    result,
+                )
                 errors.append(result)
             else:
                 errors.append(None)

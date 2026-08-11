@@ -48,8 +48,8 @@ class SQLMemoryStore:
             scope=row.scope,
             content=row.content,
             summary=row.summary,
-            importance=row.importance or 0.5,
-            confidence=row.confidence or 0.5,
+            importance=row.importance if row.importance is not None else 0.5,
+            confidence=row.confidence if row.confidence is not None else 0.5,
             source_type=row.source_type,
             source_id=row.source_id,
             sensitivity=row.sensitivity,
@@ -61,6 +61,7 @@ class SQLMemoryStore:
     # -- retrieval ---------------------------------------------------------
 
     async def search(self, query: MemoryQuery) -> list[Memory]:
+        limit = max(1, min(query.limit or 10, 100))
         async with session_scope() as session:
             stmt = select(MemoryRow).where(
                 MemoryRow.owner_id == query.owner_id,
@@ -72,19 +73,23 @@ class SQLMemoryStore:
                 stmt = stmt.where(MemoryRow.type.in_(query.types))
             if query.min_confidence:
                 stmt = stmt.where(MemoryRow.confidence >= query.min_confidence)
+            # Pre-filter with a candidate pool larger than the final limit so
+            # hybrid_rank has enough material to score. This prevents loading
+            # an unbounded row set for owners with many memories.
+            stmt = stmt.order_by(MemoryRow.created_at.desc()).limit(max(limit * 5, 100))
             rows = (await session.execute(stmt)).scalars().all()
 
         candidates = [self.to_memory(row) for row in rows]
         if not candidates or not (query.query or "").strip():
             ranked = [{"memory": m, "score": 0.0} for m in candidates]
         else:
-            ranked = await hybrid_rank(candidates, query.query, self.embeddings, top_k=query.limit)
+            ranked = await hybrid_rank(candidates, query.query, self.embeddings, top_k=limit)
         result = []
         for item in ranked:
             memory = item["memory"]
             memory.score = item["score"]
             result.append(memory)
-        return result[: query.limit]
+        return result[:limit]
 
     # -- write -------------------------------------------------------------
 

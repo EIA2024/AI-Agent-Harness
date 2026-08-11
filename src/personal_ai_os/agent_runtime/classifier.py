@@ -23,17 +23,19 @@ from personal_ai_os.common.models import ModelRequest
 
 _LEVELS = ("L0", "L1", "L2", "L3", "L4")
 
-# Priority order is significant: first match wins.
+# Priority order is significant: first match wins. L4/L3 (more specific by
+# nature) are evaluated before L1/L2 so recurring and long-running keywords
+# take precedence over single-step keywords.
 _RULES: list[tuple[str, tuple[str, ...], str]] = [
     # (level, keywords, reason-template)
-    ("L1", ("几点", "日程", "时间安排", "安排", "天气", "schedule", "calendar",
-            "what time", "when is", "tomorrow"), "单次查询任务"),
-    ("L2", ("帮我", "整理", "分析", "研究", "总结", "规划", "编写", "organize",
-            "analyze", "summarize", "plan out", "put together", "compile"), "多步骤任务"),
     ("L4", ("每周", "每天", "每月", "定时", "提醒我", "每天早晨", "every week",
             "every day", "daily", "weekly", "monthly", "remind me", "recurring"), "周期/主动任务"),
     ("L3", ("调查", "长时间", "持续追踪", "investigate", "long-running", "long term",
             "track over"), "长时间运行任务"),
+    ("L1", ("几点", "日程", "时间安排", "安排", "天气", "schedule", "calendar",
+            "what time", "when is", "tomorrow"), "单次查询任务"),
+    ("L2", ("帮我", "整理", "分析", "研究", "总结", "规划", "编写", "organize",
+            "analyze", "summarize", "plan out", "put together", "compile"), "多步骤任务"),
 ]
 
 _MODEL_CLASSIFY_PROMPT = (

@@ -38,12 +38,15 @@ async def create_session(body: SessionCreate, user=Depends(resolve_user)) -> dic
 async def list_sessions(
     user=Depends(resolve_user),
     status: str | None = Query(default=None),
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
 ) -> list[dict]:
     """List the caller's sessions (optionally filtered by status)."""
     async with session_scope() as s:
         stmt = select(Session).where(Session.owner_id == user.id).order_by(Session.last_active_at.desc())
         if status:
             stmt = stmt.where(Session.status == status)
+        stmt = stmt.limit(limit).offset(offset)
         result = await s.execute(stmt)
         return [session_to_dict(x) for x in result.scalars().all()]
 

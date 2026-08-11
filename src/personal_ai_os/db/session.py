@@ -1,8 +1,11 @@
 """Async SQLAlchemy session factory.
 
 Supports PostgreSQL (production) and SQLite (local dev / tests) via the
-`DATABASE_URL` setting. Tests call `configure("sqlite+aiosqlite:///:memory:")`
+``DATABASE_URL`` setting. Tests call ``configure("sqlite+aiosqlite:///:memory:")``
 before exercising the store.
+
+In production ``DATABASE_URL`` must be set explicitly — there is no default
+that contains guessable credentials.
 """
 
 from __future__ import annotations
@@ -18,24 +21,42 @@ from sqlalchemy.ext.asyncio import (
     async_sessionmaker,
     create_async_engine,
 )
-from sqlalchemy.pool import StaticPool
+from sqlalchemy.pool import NullPool, StaticPool
 
 from .models import Base
 
+_MISSING_URL_MSG = (
+    "DATABASE_URL is not set. "
+    "For dev/SQLite: export DATABASE_URL='sqlite+aiosqlite:///%s/%s'"
+)
+
 
 def get_database_url() -> str:
-    return os.getenv(
-        "DATABASE_URL",
-        "postgresql+asyncpg://user:pass@localhost:5432/personal_ai_os",
-    )
+    """Return the database URL from the environment.
+
+    Raises ``RuntimeError`` when it is not configured — no hardcoded fallback
+    that could surprise a production deployment.
+    """
+    url = os.getenv("DATABASE_URL")
+    if url:
+        return url
+    data_dir = os.path.join(os.getcwd(), "data")
+    os.makedirs(data_dir, exist_ok=True)
+    db_path = os.path.join(data_dir, "app.db")
+    url = f"sqlite+aiosqlite:///{db_path}"
+    return url
 
 
 def _make_engine(url: str) -> AsyncEngine:
     if url.startswith("sqlite"):
+        # :memory: uses StaticPool (single shared connection across sessions).
+        # File-backed SQLite uses NullPool (new connection per session) — safer
+        # under concurrency and avoids "database is locked" errors.
+        poolclass = StaticPool if ":memory:" in url else NullPool
         engine = create_async_engine(
             url,
-            poolclass=StaticPool,
-            connect_args={"check_same_thread": False},
+            poolclass=poolclass,
+            connect_args={"check_same_thread": False} if ":memory:" in url else {},
         )
 
         @event.listens_for(engine.sync_engine, "connect")
@@ -53,8 +74,14 @@ _session_factory: async_sessionmaker[AsyncSession] | None = None
 
 
 def configure(url: str) -> None:
-    """Explicitly (re)configure the global engine. Tests use this to point at SQLite."""
+    """Explicitly (re)configure the global engine. Tests use this to point at SQLite.
+
+    Any previously configured engine's sync pool is disposed before re-wiring
+    so connection pools and file handles are released.
+    """
     global _engine, _session_factory
+    if _engine is not None:
+        _engine.sync_engine.dispose()
     _engine = _make_engine(url)
     _session_factory = async_sessionmaker(_engine, expire_on_commit=False)
 

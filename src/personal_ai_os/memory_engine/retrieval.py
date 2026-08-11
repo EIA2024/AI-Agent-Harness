@@ -69,7 +69,9 @@ async def hybrid_rank(memory_rows: list, query: str, embeddings, top_k: int = 10
         content_embedding = await embeddings.embed(mem.content)
         cosine = cosine_similarity(query_embedding, content_embedding)
         keyword = _token_overlap(query, mem.content) or keyword_score(query, mem.content)
-        importance = float(getattr(mem, "importance", 0.5) or 0.5)
+        importance = float(getattr(mem, "importance", 0.5))
+        if importance is None:
+            importance = 0.5
         recency = recency_factor(getattr(mem, "created_at", None))
         score = 0.4 * cosine + 0.2 * keyword + 0.2 * importance + 0.2 * recency
         ranked.append(

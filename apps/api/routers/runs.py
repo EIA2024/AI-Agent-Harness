@@ -80,22 +80,48 @@ async def resume_run(
     Approval resolution lives entirely in the runner so the receipt can be
     threaded into the resume command; the API layer never calls the approval
     engine directly.
+
+    Uses a conditional UPDATE (``WHERE status = 'waiting_approval'``) so
+    concurrent resume attempts are safe — exactly one wins, the other gets 409.
     """
     runner = services.runner
     if runner is None or not hasattr(runner, "resume"):
         raise HTTPException(status_code=503, detail="Agent runner is not wired up")
 
+    from sqlalchemy import update as sa_update
+
     async with session_scope() as s:
-        result = await s.execute(select(Run).where(Run.id == run_id, Run.owner_id == user.id))
-        run = result.scalar_one_or_none()
-        if run is None:
-            raise HTTPException(status_code=404, detail="Run not found")
-        if run.status in ("completed", "failed", "cancelled"):
-            raise HTTPException(status_code=409, detail=f"Cannot resume run in status '{run.status}'")
-        run.status = "running"
-        run.started_at = run.started_at or datetime.now(UTC)
-        await s.flush()
-        await s.refresh(run)
+        # Conditional update: only flip to 'running' when the run is genuinely
+        # paused. This is atomic — two concurrent resumes cannot both pass.
+        result = await s.execute(
+            sa_update(Run)
+            .where(
+                Run.id == run_id,
+                Run.owner_id == user.id,
+                Run.status == "waiting_approval",
+            )
+            .values(status="running", started_at=Run.started_at)
+        )
+        if result.rowcount == 0:
+            # Either the run doesn't exist, doesn't belong to the owner,
+            # or is not in a resumable state. Fetch it to give a precise error.
+            check = await s.execute(
+                select(Run).where(Run.id == run_id, Run.owner_id == user.id)
+            )
+            run = check.scalar_one_or_none()
+            if run is None:
+                raise HTTPException(status_code=404, detail="Run not found")
+            if run.status in ("completed", "failed", "cancelled"):
+                raise HTTPException(
+                    status_code=409, detail=f"Cannot resume run in status '{run.status}'"
+                )
+            raise HTTPException(
+                status_code=409, detail=f"Run is not awaiting approval (status: '{run.status}')"
+            )
+        # Re-fetch for the response
+        run = (await s.execute(
+            select(Run).where(Run.id == run_id)
+        )).scalar_one()
         data = run_to_dict(run)
 
     decision = _normalize_approval_decision(body.decision)

@@ -17,6 +17,22 @@ from ..serializers import approval_to_dict
 router = APIRouter(prefix="/v1/approvals", tags=["approvals"])
 
 
+def _normalize_decision(raw: str | None) -> str:
+    """Map loose client strings to the canonical ApprovalEngine decision values."""
+    if raw is None:
+        return "approved"
+    canonical = {
+        "approve": "approved",
+        "approved": "approved",
+        "edit": "approved_with_edits",
+        "approve_with_edits": "approved_with_edits",
+        "approved_with_edits": "approved_with_edits",
+        "reject": "rejected",
+        "rejected": "rejected",
+    }
+    return canonical.get(raw.strip().lower(), raw)
+
+
 async def _load_owned(approval_id: UUID, owner_id) -> Approval | None:
     async with session_scope() as s:
         result = await s.execute(
@@ -33,20 +49,15 @@ async def _resolve(
     services,
     edited_arguments: dict | None = None,
 ) -> dict:
-    async with session_scope() as s:
-        current = await s.get(Approval, approval.id)
-        if current is None:
-            raise HTTPException(status_code=404, detail="Approval not found")
-        if current.status != "pending":
-            raise HTTPException(status_code=409, detail=f"Approval already '{current.status}'")
-        current.status = "approved" if decision == "approve" else "rejected"
-        current.approved_by = user.id
-        if edited_arguments is not None:
-            current.arguments_preview = edited_arguments
-        await s.flush()
-        await s.refresh(current)
-        data = approval_to_dict(current)
+    """Resolve an approval through the ApprovalEngine (for hash binding + receipt).
 
+    The engine owns the resolution; the API layer normalises the client's
+    decision string and delegates. The DB row is updated here directly as well
+    so that tests with fake engines and production with the real engine both
+    work correctly — the engine's own ``session_scope`` transaction handles its
+    side (receipt + hash), and the API's ``session_scope`` handles the visible
+    row state.
+    """
     engine = services.approval_engine
     if engine is not None:
         try:
@@ -56,9 +67,26 @@ async def _resolve(
                 approved_by=user.id,
                 edited_arguments=edited_arguments,
             )
-        except Exception:  # noqa: BLE001 - DB state is authoritative; engine is best-effort
+        except Exception:
+            # Engine may already have resolved this (idempotent resume).
+            # The direct DB update below is the source of truth for the API
+            # response; the engine's side effects (receipt, hash binding)
+            # are best-effort.
             pass
-    return data
+
+    async with session_scope() as s:
+        current = await s.get(Approval, approval.id)
+        if current is None:
+            raise HTTPException(status_code=404, detail="Approval not found")
+        if current.status != "pending":
+            raise HTTPException(status_code=409, detail=f"Approval already '{current.status}'")
+        current.status = "approved" if decision in ("approved", "approved_with_edits") else "rejected"
+        current.approved_by = user.id
+        if edited_arguments is not None:
+            current.arguments_preview = edited_arguments
+        await s.flush()
+        await s.refresh(current)
+        return approval_to_dict(current)
 
 
 @router.get("")
@@ -84,7 +112,7 @@ async def approve(approval_id: UUID, user=Depends(resolve_user), services=Depend
     approval = await _load_owned(approval_id, user.id)
     if approval is None:
         raise HTTPException(status_code=404, detail="Approval not found")
-    return await _resolve(approval, decision="approve", user=user, services=services)
+    return await _resolve(approval, decision=_normalize_decision("approved"), user=user, services=services)
 
 
 @router.post("/{approval_id}/reject")
@@ -92,7 +120,7 @@ async def reject(approval_id: UUID, user=Depends(resolve_user), services=Depends
     approval = await _load_owned(approval_id, user.id)
     if approval is None:
         raise HTTPException(status_code=404, detail="Approval not found")
-    return await _resolve(approval, decision="reject", user=user, services=services)
+    return await _resolve(approval, decision=_normalize_decision("rejected"), user=user, services=services)
 
 
 @router.post("/{approval_id}/edit")
@@ -108,7 +136,7 @@ async def edit(
         raise HTTPException(status_code=404, detail="Approval not found")
     return await _resolve(
         approval,
-        decision="approve",
+        decision=_normalize_decision("approved_with_edits"),
         user=user,
         services=services,
         edited_arguments=body.edited_arguments,

@@ -99,7 +99,8 @@ async def _available_tool_schemas(tool_broker: Any, state: dict) -> list[dict]:
     if list_method is None:
         return []
     try:
-        tools = list_method(state.get("owner_id"))
+        # Must be called keyword-style — broker method signature is keyword-only (*).
+        tools = list_method(owner_id=state.get("owner_id"))
         if hasattr(tools, "__await__"):
             tools = await tools
         schemas: list[dict] = []
@@ -110,6 +111,7 @@ async def _available_tool_schemas(tool_broker: Any, state: dict) -> list[dict]:
                 schemas.append(tool)
         return schemas
     except Exception:
+        logger.warning("Failed to list available tool schemas", exc_info=True)
         return []
 
 
@@ -143,13 +145,16 @@ def _tool_message_content(entry: dict) -> str:
 
 
 def _serialize_tool_result(result: Any, pending: Any, name: str, ctx: ToolExecutionContext,
-                           arguments: dict | None = None) -> dict:
+                           arguments: dict | None = None, tool_trust: str | None = None) -> dict:
     if hasattr(result, "to_dict"):
         data = result.to_dict()
     elif isinstance(result, dict):
         data = dict(result)
     else:
         data = {"text": str(result)}
+    # Honour the tool descriptor's result_trust; default to trusted_tool for
+    # built-in connectors that don't surface external content.
+    trust = tool_trust or "trusted_tool"
     data.update(
         {
             "id": str(uuid.uuid4()),
@@ -157,7 +162,7 @@ def _serialize_tool_result(result: Any, pending: Any, name: str, ctx: ToolExecut
             "arguments": arguments or {},
             "tool_call_id": pending.get("id") if isinstance(pending, dict) else None,
             "tool_call": pending,
-            "trust": "trusted_tool",
+            "trust": trust,
             "idempotency_key": ctx.idempotency_key,
         }
     )
@@ -213,17 +218,31 @@ async def intake(state: AgentState, deps: _Deps) -> dict:
 
 
 async def build_context(state: AgentState, deps: _Deps) -> dict:
-    """Assemble the 4-tier context via the injected ContextEngine."""
+    """Assemble the 4-tier context via the injected ContextEngine.
+
+    The full built result (including messages) is cached in state so
+    downstream nodes like ``decide`` don't rebuild the same context.
+    """
     built = await deps.context_engine.build(state)
     return {
         "status": "building_context",
         "context_items": built.get("context_items") or [],
+        "_cached_context": built,  # avoid redundant rebuild in decide
     }
 
 
 async def decide(state: AgentState, deps: _Deps) -> dict:
-    """Ask the model for the next action (respond / plan / tool call)."""
-    built = await deps.context_engine.build(state)
+    """Ask the model for the next action (respond / plan / tool call).
+
+    Reuses the cached context from ``build_context`` when available, falling
+    back to a fresh build only when the cache is absent (e.g. observe loop
+    where state has changed).
+    """
+    cached = state.get("_cached_context")
+    if cached is not None and isinstance(cached, dict) and cached.get("messages"):
+        built = cached
+    else:
+        built = await deps.context_engine.build(state)
     tools = await _available_tool_schemas(deps.tool_broker, state)
     request = ModelRequest(
         purpose="assistant",
@@ -309,11 +328,16 @@ async def tool_request(state: AgentState, deps: _Deps) -> dict:
             },
         }
 
+    # Resolve the tool's declared result trust level so the context engine
+    # can wrap untrusted content (e.g. web fetches) in DATA markers.
+    tool = deps.tool_broker._registry.get(name) if hasattr(deps.tool_broker, "_registry") else None
+    tool_trust = getattr(tool, "result_trust", None) if tool is not None else None
+
     return {
         "status": "executing_tool",
         "pending_tool_call": None,
         "pending_approval": None,
-        "tool_results": existing + [_serialize_tool_result(result, pending, name, ctx, arguments)],
+        "tool_results": existing + [_serialize_tool_result(result, pending, name, ctx, arguments, tool_trust)],
     }
 
 
@@ -380,12 +404,14 @@ async def approval(state: AgentState, deps: _Deps) -> dict:
         approval_id=UUID(approval_id) if approval_id else None,
     )
     result = await deps.tool_broker.execute(name, arguments, ctx)
+    tool = deps.tool_broker._registry.get(name) if hasattr(deps.tool_broker, "_registry") else None
+    tool_trust = getattr(tool, "result_trust", None) if tool is not None else None
     return {
         "status": "executing_tool",
         "pending_tool_call": None,
         "pending_approval": None,
         "tool_results": list(state.get("tool_results") or [])
-        + [_serialize_tool_result(result, pending, name, ctx, arguments)],
+        + [_serialize_tool_result(result, pending, name, ctx, arguments, tool_trust)],
     }
 
 
@@ -426,7 +452,11 @@ async def respond(state: AgentState, deps: _Deps) -> dict:
     usage = dict(state.get("model_usage") or {})
     if not content:
         # Fallback: generate directly (e.g. rejected approval path without content).
-        built = await deps.context_engine.build(state)
+        cached = state.get("_cached_context")
+        if cached is not None and isinstance(cached, dict) and cached.get("messages"):
+            built = cached
+        else:
+            built = await deps.context_engine.build(state)
         response = await deps.model_provider.complete(
             ModelRequest(purpose="respond", messages=built["messages"])
         )

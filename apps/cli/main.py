@@ -65,8 +65,25 @@ def _ensure_session(client: APIClient, session_id: str | None) -> str:
     return created["id"]
 
 
+def _print_reply(client: APIClient, run_id: str) -> None:
+    """Fetch a completed run and print its final assistant response."""
+    run = client.get(f"/v1/runs/{run_id}")
+    status = run.get("status", "unknown")
+
+    if status == "completed":
+        final = (run.get("state") or {}).get("final_response")
+        if final:
+            print(final)
+        return
+    if status == "waiting_approval":
+        print("  ⏸  等待人工审批（`personal-ai approve --list` 查看）")
+        return
+    err = run.get("error") or {}
+    print(f"  ⚠  Run {status}: {err.get('message') or err.get('code') or ''}".rstrip())
+
+
 def cmd_chat(args: argparse.Namespace) -> None:
-    """Interactive chat: loop stdin -> POST message -> print result."""
+    """Interactive chat: loop stdin -> POST message -> print result + reply."""
     client = APIClient()
     session_id = _ensure_session(client, args.session)
     while True:
@@ -77,14 +94,22 @@ def cmd_chat(args: argparse.Namespace) -> None:
         if not text.strip():
             continue
         resp = client.post(f"/v1/sessions/{session_id}/messages", json={"text": text})
-        print(f"[run {resp.get('run_id')} status={resp.get('status')}]")
+        run_id = resp.get("run_id")
+        status = resp.get("status", "running")
+        print(f"[run {run_id} status={status}]")
+        if run_id:
+            _print_reply(client, run_id)
 
 
 def cmd_send(args: argparse.Namespace) -> None:
     client = APIClient()
     session_id = _ensure_session(client, args.session)
     resp = client.post(f"/v1/sessions/{session_id}/messages", json={"text": args.text})
-    print(json.dumps(resp, ensure_ascii=False))
+    run_id = resp.get("run_id")
+    status = resp.get("status", "running")
+    print(f"[run {run_id} status={status}]")
+    if run_id:
+        _print_reply(client, run_id)
 
 
 def cmd_sessions(args: argparse.Namespace) -> None:

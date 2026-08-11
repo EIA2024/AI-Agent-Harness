@@ -11,7 +11,7 @@ services:
     environment:
       - DATABASE_URL=postgresql+asyncpg://user:pass@postgres:5432/personal_ai_os
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
-      - PERSONAL_AI_API_KEY=${PERSONAL_AI_API_KEY:-dev-key}
+      - PERSONAL_AI_DEV_API_KEY=${PERSONAL_AI_DEV_API_KEY:-dev-key}
     volumes:
       - ./data:/app/data
     depends_on:

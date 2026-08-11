@@ -11,6 +11,9 @@ from personal_ai_os.db.models import AuditEvent, Run, User
 from personal_ai_os.db.session import session_scope
 from personal_ai_os.gateway.services import ServiceContainer
 
+_AUTO_KEY = "auto-test-key"
+_AUTO_AUTH = {"X-API-Key": _AUTO_KEY}
+
 
 class FakeRunner:
     def __init__(self):
@@ -31,6 +34,16 @@ async def _make_user(api_key: str) -> User:
         await s.flush()
         await s.refresh(u)
         return u
+
+
+async def _ensure_auto_user():
+    async with session_scope() as s:
+        from sqlalchemy import select
+        r = await s.execute(select(User).where(User.api_key == _AUTO_KEY))
+        if r.scalar_one_or_none() is None:
+            u = User(username=f"auto-{uuid.uuid4().hex[:8]}", api_key=_AUTO_KEY)
+            s.add(u)
+            await s.flush()
 
 
 async def _make_run(owner_id, *, status: str = "running") -> Run:
@@ -84,7 +97,7 @@ async def test_run_cancel(make_api, db):
 @pytest.mark.asyncio
 async def test_run_resume(make_api, db):
     u = await _make_user("runs-key")
-    run = await _make_run(u.id, status="paused")
+    run = await _make_run(u.id, status="waiting_approval")
     runner = FakeRunner()
     headers = {"X-API-Key": "runs-key"}
 
@@ -120,6 +133,7 @@ async def test_run_owner_isolation(make_api, db):
 
 @pytest.mark.asyncio
 async def test_automation_crud(make_api):
+    await _ensure_auto_user()
     async with make_api(services=ServiceContainer()) as ac:
         created = await ac.post(
             "/v1/automations",
@@ -129,6 +143,7 @@ async def test_automation_crud(make_api):
                 "trigger_config": {"cron": "0 8 * * *"},
                 "prompt": "Summarize my email",
             },
+            headers=_AUTO_AUTH,
         )
         assert created.status_code == 201, created.text
         body = created.json()
@@ -136,29 +151,30 @@ async def test_automation_crud(make_api):
         assert body["status"] == "active"
         aid = body["id"]
 
-        listing = await ac.get("/v1/automations")
+        listing = await ac.get("/v1/automations", headers=_AUTO_AUTH)
         assert listing.status_code == 200
         assert aid in [a["id"] for a in listing.json()]
 
-        patched = await ac.patch(f"/v1/automations/{aid}", json={"enabled": False})
+        patched = await ac.patch(f"/v1/automations/{aid}", json={"enabled": False}, headers=_AUTO_AUTH)
         assert patched.status_code == 200
         assert patched.json()["enabled"] is False
 
-        deleted = await ac.delete(f"/v1/automations/{aid}")
+        deleted = await ac.delete(f"/v1/automations/{aid}", headers=_AUTO_AUTH)
         assert deleted.status_code == 200
         assert deleted.json()["deleted"] is True
 
-        listing2 = await ac.get("/v1/automations")
+        listing2 = await ac.get("/v1/automations", headers=_AUTO_AUTH)
         assert aid not in [a["id"] for a in listing2.json()]
 
 
 @pytest.mark.asyncio
 async def test_automation_run_returns_501_without_scheduler(make_api):
+    await _ensure_auto_user()
     async with make_api(services=ServiceContainer()) as ac:
         aid = (
-            await ac.post("/v1/automations", json={"name": "x", "prompt": "do it"})
+            await ac.post("/v1/automations", json={"name": "x", "prompt": "do it"}, headers=_AUTO_AUTH)
         ).json()["id"]
-        r = await ac.post(f"/v1/automations/{aid}/run")
+        r = await ac.post(f"/v1/automations/{aid}/run", headers=_AUTO_AUTH)
         assert r.status_code == 501
 
 
@@ -183,6 +199,9 @@ async def test_audit_list(make_api, db):
         )
         await s.flush()
 
+    # create a second user for the cross-owner test
+    u2 = await _make_user("other-key")
+
     async with make_api(services=ServiceContainer()) as ac:
         r = await ac.get("/v1/audit", params={"limit": 5}, headers={"X-API-Key": "audit-key"})
         assert r.status_code == 200
@@ -192,5 +211,5 @@ async def test_audit_list(make_api, db):
         assert events[0]["details"] == {"via": "test"}
 
         # other user sees nothing
-        other = await ac.get("/v1/audit", headers={"X-API-Key": "dev-key"})
+        other = await ac.get("/v1/audit", headers={"X-API-Key": "other-key"})
         assert other.json() == []

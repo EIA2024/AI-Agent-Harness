@@ -95,8 +95,13 @@ async def test_stream_owner_isolation(make_api, db):
 
 @pytest.mark.asyncio
 async def test_stream_unknown_run(make_api):
+    u = User(username=f"u{uuid.uuid4().hex[:8]}", api_key="stream-auth-key")
+    async with session_scope() as s:
+        s.add(u)
+        await s.flush()
+    headers = {"X-API-Key": "stream-auth-key"}
     async with make_api(services=ServiceContainer()) as ac:
-        async with ac.stream("GET", f"/v1/runs/{uuid.uuid4()}/stream") as resp:
+        async with ac.stream("GET", f"/v1/runs/{uuid.uuid4()}/stream", headers=headers) as resp:
             body = "".join([t async for t in resp.aiter_text()])
 
     assert "Run not found" in body

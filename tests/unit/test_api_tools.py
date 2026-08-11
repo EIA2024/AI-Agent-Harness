@@ -2,10 +2,25 @@
 
 from __future__ import annotations
 
+import uuid
+
 import pytest
 
 from personal_ai_os.common.models import ToolDescriptor
+from personal_ai_os.db.models import User
+from personal_ai_os.db.session import session_scope
 from personal_ai_os.gateway.services import ServiceContainer
+
+
+_TEST_KEY = "tools-test-key"
+
+
+async def _ensure_user():
+    async with session_scope() as s:
+        u = User(username=f"tools-{uuid.uuid4().hex[:8]}", api_key=_TEST_KEY)
+        s.add(u)
+        await s.flush()
+        return u
 
 
 class FakeRegistry:
@@ -38,8 +53,10 @@ class AsyncFakeRegistry(FakeRegistry):
 
 @pytest.mark.asyncio
 async def test_list_tools(make_api):
+    await _ensure_user()
+    headers = {"X-API-Key": _TEST_KEY}
     async with make_api(services=ServiceContainer(tool_registry=FakeRegistry())) as ac:
-        r = await ac.get("/v1/tools")
+        r = await ac.get("/v1/tools", headers=headers)
         assert r.status_code == 200
         data = r.json()
         assert len(data) == 2
@@ -52,15 +69,19 @@ async def test_list_tools(make_api):
 
 @pytest.mark.asyncio
 async def test_list_tools_async_registry(make_api):
+    await _ensure_user()
+    headers = {"X-API-Key": _TEST_KEY}
     async with make_api(services=ServiceContainer(tool_registry=AsyncFakeRegistry())) as ac:
-        r = await ac.get("/v1/tools")
+        r = await ac.get("/v1/tools", headers=headers)
         assert r.status_code == 200
         assert len(r.json()) == 2
 
 
 @pytest.mark.asyncio
 async def test_list_tools_empty_without_registry(make_api):
+    await _ensure_user()
+    headers = {"X-API-Key": _TEST_KEY}
     async with make_api(services=ServiceContainer()) as ac:
-        r = await ac.get("/v1/tools")
+        r = await ac.get("/v1/tools", headers=headers)
         assert r.status_code == 200
         assert r.json() == []

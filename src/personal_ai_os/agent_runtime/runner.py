@@ -246,6 +246,7 @@ class RunRunner:
     async def cancel(self, run_id) -> None:
         """Cancel a run and reject any of its pending approvals."""
         run_uuid = _coerce_uuid(run_id)
+        self._cleanup_bookkeeping(str(run_id))
         async with session_scope() as session:
             run = await session.get(Run, run_uuid)
             if run is None:
@@ -523,6 +524,7 @@ class RunRunner:
             )
 
     async def _finalize(self, run_id: uuid.UUID, *, success: bool) -> None:
+        self._cleanup_bookkeeping(str(run_id))
         async with session_scope() as session:
             run = await session.get(Run, run_id)
             if run is None:
@@ -547,6 +549,7 @@ class RunRunner:
             )
 
     async def _fail(self, run_id: uuid.UUID, exc: BaseException) -> None:
+        self._cleanup_bookkeeping(str(run_id))
         code, message = self._classify_error(exc)
         async with session_scope() as session:
             run = await session.get(Run, run_id)
@@ -584,3 +587,8 @@ class RunRunner:
     async def _get_run_row(self, run_id: uuid.UUID) -> Run | None:
         async with session_scope() as session:
             return await session.get(Run, run_id)
+
+    def _cleanup_bookkeeping(self, run_id_key: str) -> None:
+        """Release per-run in-memory dedup state to prevent unbounded growth."""
+        self._persisted_tool_ids.pop(run_id_key, None)
+        self._persisted_message_count.pop(run_id_key, None)

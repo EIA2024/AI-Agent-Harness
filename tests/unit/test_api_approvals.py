@@ -75,7 +75,7 @@ async def test_list_pending_and_approve(make_api, db):
         assert r.json()["approved_by"]
 
         assert len(engine.resolved) == 1
-        assert engine.resolved[0]["decision"] == "approve"
+        assert engine.resolved[0]["decision"] == "approved"
         assert engine.resolved[0]["approval_id"] == approval.id
 
         # no longer pending

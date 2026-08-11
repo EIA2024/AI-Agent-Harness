@@ -6,11 +6,24 @@ import uuid
 from datetime import UTC, datetime
 
 import pytest
+from sqlalchemy import select as _select
 
 from personal_ai_os.common.models import Memory
 from personal_ai_os.db.models import User
 from personal_ai_os.db.session import session_scope
 from personal_ai_os.gateway.services import ServiceContainer
+
+_MEM_KEY = "mem-test-key"
+_AUTH = {"X-API-Key": _MEM_KEY}
+
+
+async def _ensure_user():
+    async with session_scope() as s:
+        r = await s.execute(_select(User).where(User.api_key == _MEM_KEY))
+        if r.scalar_one_or_none() is None:
+            u = User(username=f"mem-{uuid.uuid4().hex[:8]}", api_key=_MEM_KEY)
+            s.add(u)
+            await s.flush()
 
 
 class FakeMemoryStore:
@@ -40,10 +53,12 @@ class FakeMemoryStore:
 
 @pytest.mark.asyncio
 async def test_memory_crud(make_api):
+    await _ensure_user()
     async with make_api(services=ServiceContainer()) as ac:
         created = await ac.post(
             "/v1/memories",
             json={"type": "fact", "scope": "global", "content": "My name is Alice"},
+            headers=_AUTH,
         )
         assert created.status_code == 201, created.text
         body = created.json()
@@ -51,36 +66,37 @@ async def test_memory_crud(make_api):
         assert body["content"] == "My name is Alice"
         mid = body["id"]
 
-        listing = await ac.get("/v1/memories")
+        listing = await ac.get("/v1/memories", headers=_AUTH)
         assert listing.status_code == 200
         assert mid in [m["id"] for m in listing.json()]
 
-        filtered = await ac.get("/v1/memories", params={"type": "fact"})
+        filtered = await ac.get("/v1/memories", params={"type": "fact"}, headers=_AUTH)
         assert len(filtered.json()) == 1
-        filtered_none = await ac.get("/v1/memories", params={"type": "other"})
+        filtered_none = await ac.get("/v1/memories", params={"type": "other"}, headers=_AUTH)
         assert filtered_none.json() == []
 
-        one = await ac.get(f"/v1/memories/{mid}")
+        one = await ac.get(f"/v1/memories/{mid}", headers=_AUTH)
         assert one.status_code == 200
         assert one.json()["content"] == "My name is Alice"
 
-        patched = await ac.patch(f"/v1/memories/{mid}", json={"content": "My name is Alice B"})
+        patched = await ac.patch(f"/v1/memories/{mid}", json={"content": "My name is Alice B"}, headers=_AUTH)
         assert patched.status_code == 200
         assert patched.json()["content"] == "My name is Alice B"
 
-        forgotten = await ac.delete(f"/v1/memories/{mid}")
+        forgotten = await ac.delete(f"/v1/memories/{mid}", headers=_AUTH)
         assert forgotten.status_code == 200
         assert forgotten.json()["status"] == "forgotten"
 
-        missing = await ac.get(f"/v1/memories/{uuid.uuid4()}")
+        missing = await ac.get(f"/v1/memories/{uuid.uuid4()}", headers=_AUTH)
         assert missing.status_code == 404
 
 
 @pytest.mark.asyncio
 async def test_memory_search_with_injected_store(make_api):
+    await _ensure_user()
     store = FakeMemoryStore()
     async with make_api(services=ServiceContainer(memory_store=store)) as ac:
-        r = await ac.post("/v1/memories/search", json={"query": "python", "limit": 5})
+        r = await ac.post("/v1/memories/search", json={"query": "python", "limit": 5}, headers=_AUTH)
         assert r.status_code == 200
         data = r.json()
         assert len(data) == 1
@@ -91,11 +107,12 @@ async def test_memory_search_with_injected_store(make_api):
 
 @pytest.mark.asyncio
 async def test_memory_search_db_fallback(make_api):
+    await _ensure_user()
     async with make_api(services=ServiceContainer()) as ac:
-        await ac.post("/v1/memories", json={"type": "fact", "scope": "global", "content": "I like hiking"})
-        await ac.post("/v1/memories", json={"type": "fact", "scope": "global", "content": "I like coding"})
+        await ac.post("/v1/memories", json={"type": "fact", "scope": "global", "content": "I like hiking"}, headers=_AUTH)
+        await ac.post("/v1/memories", json={"type": "fact", "scope": "global", "content": "I like coding"}, headers=_AUTH)
 
-        r = await ac.post("/v1/memories/search", json={"query": "hiking"})
+        r = await ac.post("/v1/memories/search", json={"query": "hiking"}, headers=_AUTH)
         assert r.status_code == 200
         contents = [m["content"] for m in r.json()]
         assert "I like hiking" in contents
@@ -104,13 +121,14 @@ async def test_memory_search_db_fallback(make_api):
 
 @pytest.mark.asyncio
 async def test_memory_owner_isolation(make_api, db):
+    await _ensure_user()
     async with session_scope() as s:
         other = User(username=f"u{uuid.uuid4().hex[:8]}", api_key="other-key")
         s.add(other)
         await s.flush()
 
     async with make_api(services=ServiceContainer()) as ac:
-        created = await ac.post("/v1/memories", json={"type": "fact", "content": "secret"})
+        created = await ac.post("/v1/memories", json={"type": "fact", "content": "secret"}, headers=_AUTH)
         mid = created.json()["id"]
 
         listing = await ac.get("/v1/memories", headers={"X-API-Key": "other-key"})

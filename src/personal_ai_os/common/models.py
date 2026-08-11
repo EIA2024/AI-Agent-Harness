@@ -128,7 +128,7 @@ class ToolDescriptor:
         "name", "namespace", "description", "input_schema", "output_schema",
         "source", "source_ref", "risk_level", "side_effect", "destructive",
         "external_write", "idempotent", "credential_scope", "timeout_seconds",
-        "retry_policy", "tags", "version",
+        "retry_policy", "tags", "version", "result_trust",
     )
 
     def __init__(
@@ -151,6 +151,7 @@ class ToolDescriptor:
         retry_policy: str | None = None,
         tags: list[str] | None = None,
         version: str = "0.1.0",
+        result_trust: str | None = None,
     ):
         self.name = name
         self.namespace = namespace
@@ -169,6 +170,8 @@ class ToolDescriptor:
         self.retry_policy = retry_policy
         self.tags = tags or []
         self.version = version
+        # trust level for results from this tool; None → trusted_tool (default)
+        self.result_trust = result_trust
 
     def to_llm_schema(self) -> dict:
         """Return the OpenAI-style function schema for LLM injection."""
