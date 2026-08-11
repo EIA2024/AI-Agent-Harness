@@ -1,0 +1,11 @@
+event: run.started
+data: {"run_id": "r1"}
+
+event: tool.requested
+data: {"tool_name": "filesystem.read", "tool_call": {"id": "call_1", "type": "function", "function": {"name": "filesystem.read", "arguments": "{\"path\": \"src\"}"}}}
+
+event: text.delta
+data: {"text": "Found it"}
+
+event: run.completed
+data: {"run_id": "r1", "status": "completed"}

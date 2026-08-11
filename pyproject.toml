@@ -25,6 +25,9 @@ dependencies = [
     "uuid6>=2024.7.10",
 ]
 
+[project.scripts]
+personal-ai = "personal_ai_os.cli.main:main"
+
 [project.optional-dependencies]
 dev = [
     "pytest>=8.3",

@@ -1,0 +1,11 @@
+event: run.started
+data: {"run_id": "r1"}
+
+event: thinking.delta
+data: {"text": "Let me reason about this"}
+
+event: text.delta
+data: {"text": "Answer"}
+
+event: run.completed
+data: {"run_id": "r1", "status": "completed"}

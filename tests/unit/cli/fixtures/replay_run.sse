@@ -1,0 +1,17 @@
+event: run.started
+data: {"run_id": "r1", "status": "completed"}
+
+event: thinking.delta
+data: {"text": "replayed thinking", "replay": true}
+
+event: build_context
+data: {"run_id": "r1", "step_id": "st1", "step_type": "build_context", "status": "completed"}
+
+event: tool.completed
+data: {"run_id": "r1", "step_id": "st2", "step_type": "tool", "status": "completed", "tool": "filesystem.read", "success": true, "latency_ms": 420, "truncated": false}
+
+event: text.delta
+data: {"text": "Final answer", "replay": true}
+
+event: run.completed
+data: {"run_id": "r1"}

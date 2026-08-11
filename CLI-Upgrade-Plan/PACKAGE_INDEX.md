@@ -1,0 +1,35 @@
+# Package Index
+
+- `00_EXECUTION_PROTOCOL.md`
+- `01_CURRENT_STATE_AUDIT.md`
+- `02_FIRST_PRINCIPLES.md`
+- `03_REFERENCE_RESEARCH.md`
+- `04_TARGET_UX_INFORMATION_ARCHITECTURE.md`
+- `05_TARGET_TECHNICAL_ARCHITECTURE.md`
+- `06_TUI_VISUAL_SPEC.md`
+- `07_INTERACTION_COMMAND_KEYMAP.md`
+- `08_STREAMING_EVENT_RENDERER.md`
+- `09_APPROVAL_POLICY_SECURITY_UX.md`
+- `10_SESSION_CONTEXT_MEMORY_UX.md`
+- `11_TOOL_DIFF_ARTIFACT_UX.md`
+- `12_NON_INTERACTIVE_AUTOMATION.md`
+- `13_CONFIGURATION_PROVIDER_MCP.md`
+- `14_OBSERVABILITY_DIAGNOSTICS.md`
+- `15_TESTING_QUALITY_GATES.md`
+- `16_MIGRATION_COMPATIBILITY.md`
+- `17_IMPLEMENTATION_PHASES.md`
+- `18_AGENT_TASK_CARDS.md`
+- `19_ACCEPTANCE_CHECKLIST.md`
+- `20_FILE_CHANGE_MAP.md`
+- `ADR/ADR-001-tui-framework.md`
+- `ADR/ADR-002-event-model.md`
+- `ADR/ADR-003-output-channels-jsonl.md`
+- `ADR/ADR-004-permission-model.md`
+- `AGENT_START_PROMPT.md`
+- `README.md`
+- `SOURCES.md`
+- `manifest.json`
+- `wireframes/approval-flow.md`
+- `wireframes/interactive-main.md`
+- `wireframes/narrow-terminal.md`
+- `wireframes/session-picker.md`
