@@ -17,6 +17,7 @@ database.
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from datetime import UTC, datetime
 from typing import Any
@@ -26,6 +27,7 @@ from langgraph.types import Command
 from sqlalchemy import select
 from sqlalchemy import update as sa_update
 
+from personal_ai_os.agent_runtime.streams import push as push_live
 from personal_ai_os.common.models import (
     AgentOSError,
     DomainEvent,
@@ -85,18 +87,12 @@ class RunRunner:
         # in-memory bookkeeping for persistence dedup (keyed by run id)
         self._persisted_tool_ids: dict[str, set[str]] = {}
         self._persisted_message_count: dict[str, int] = {}
+        self._bg_tasks: dict[str, asyncio.Task] = {}  # streaming background runs
 
     # ------------------------------------------------------------------ start
 
-    async def start(
-        self,
-        *,
-        session_id,
-        owner_id,
-        user_input: str,
-        agent_id=None,
-    ) -> dict:
-        """Create a Run and execute it to completion (or approval pause)."""
+    async def _init_run(self, *, session_id, owner_id, user_input, agent_id=None):
+        """Create the Run + user Message rows; return (run_id, initial_state)."""
         run_id = uuid.uuid4()
         owner_uuid = _coerce_uuid(owner_id)
         session_uuid = _coerce_uuid(session_id)
@@ -165,7 +161,20 @@ class RunRunner:
         }
         self._persisted_tool_ids[str(run_id)] = set()
         self._persisted_message_count[str(run_id)] = 1  # the user message above
+        return run_id, initial
 
+    async def start(
+        self,
+        *,
+        session_id,
+        owner_id,
+        user_input: str,
+        agent_id=None,
+    ) -> dict:
+        """Blocking run to completion (tests / non-streaming paths)."""
+        run_id, initial = await self._init_run(
+            session_id=session_id, owner_id=owner_id, user_input=user_input, agent_id=agent_id
+        )
         config = {"configurable": {"thread_id": str(run_id)}}
         try:
             interrupt_payload = await self._stream(run_id, initial, config)
@@ -177,6 +186,53 @@ class RunRunner:
         except Exception as exc:
             await self._fail(run_id, exc)
             raise
+
+    async def start_streaming(
+        self,
+        *,
+        session_id,
+        owner_id,
+        user_input: str,
+        agent_id=None,
+    ) -> dict:
+        """Start a run in the background and return immediately so the caller
+        can subscribe to the live SSE stream (``GET /v1/runs/{id}/stream``)."""
+        run_id, initial = await self._init_run(
+            session_id=session_id, owner_id=owner_id, user_input=user_input, agent_id=agent_id
+        )
+        from personal_ai_os.agent_runtime import streams
+
+        streams.register(run_id)
+        push_live(run_id, "run.started", {"run_id": str(run_id)})
+        config = {"configurable": {"thread_id": str(run_id)}}
+        task = asyncio.create_task(self._run_background(run_id, initial, config))
+        self._bg_tasks[str(run_id)] = task
+        return {"id": str(run_id), "run_id": str(run_id), "status": "running"}
+
+    async def _run_background(self, run_id: uuid.UUID, initial: dict, config: dict) -> None:
+        """Background execution for streaming runs; finalizes + unregisters stream."""
+        from personal_ai_os.agent_runtime import streams
+
+        terminal = "run.completed"
+        try:
+            interrupt_payload = await self._stream(run_id, initial, config)
+            if interrupt_payload is not None:
+                await self._handle_approval_interrupt(run_id, interrupt_payload)
+                terminal = "approval.required"
+            else:
+                await self._finalize(run_id, success=True)
+        except Exception as exc:
+            await self._fail(run_id, exc)
+            terminal = "run.failed"
+        finally:
+            status = "completed"
+            if terminal == "approval.required":
+                status = "waiting_approval"
+            elif terminal == "run.failed":
+                status = "failed"
+            push_live(run_id, terminal, {"run_id": str(run_id), "status": status})
+            streams.unregister(run_id)
+            self._bg_tasks.pop(str(run_id), None)
 
     # ------------------------------------------------------------------ resume
 

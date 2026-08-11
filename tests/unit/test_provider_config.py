@@ -244,3 +244,76 @@ async def test_openai_health_check():
         api_key="sk-test", transport=_mock_transport({"data": []}, status=200)
     )
     assert await provider.health_check() is True
+
+
+def _sse_response(chunks: list[dict]) -> httpx.Response:
+    """Build an SSE-style response body from chunk dicts."""
+    body = "".join(f"data: {json.dumps(c)}\n\n" for c in chunks) + "data: [DONE]\n\n"
+    return httpx.Response(200, text=body, request=httpx.Request("POST", "http://t"))
+
+
+@pytest.mark.asyncio
+async def test_openai_stream_thinking_then_text():
+    """SSE stream: reasoning_content deltas then content deltas are surfaced
+    as thinking_delta / text_delta events (DeepSeek reasoning models)."""
+    from personal_ai_os.model_gateway.provider import _sanitize_tool_name  # noqa: F401
+
+    chunks = [
+        {"choices": [{"delta": {"role": "assistant", "reasoning_content": "先算"}}]},
+        {"choices": [{"delta": {"reasoning_content": " 16-9=7"}}]},
+        {"choices": [{"delta": {"content": "答案是 "}}]},
+        {"choices": [{"delta": {"content": "√7/4"}, "finish_reason": "stop"}]},
+        {"choices": [{"delta": {}}], "usage": {"prompt_tokens": 10, "completion_tokens": 5}},
+    ]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        assert body.get("stream") is True
+        return _sse_response(chunks)
+
+    provider = OpenAICompatibleProvider(api_key="sk-test", transport=httpx.MockTransport(handler))
+    events = []
+    async for ev in provider.stream(
+        ModelRequest(purpose="assistant", messages=[{"role": "user", "content": "q"}])
+    ):
+        events.append(ev)
+
+    thinking = "".join(e.text for e in events if e.type == "thinking_delta")
+    text = "".join(e.text for e in events if e.type == "text_delta")
+    assert thinking == "先算 16-9=7"
+    assert text == "答案是 √7/4"
+    assert events[-1].type == "done"
+    assert events[-1].usage.input_tokens == 10
+
+
+@pytest.mark.asyncio
+async def test_openai_stream_tool_call():
+    """SSE stream with fragmented tool_calls accumulates and maps names back."""
+    chunks = [
+        {"choices": [{"delta": {"tool_calls": [{"index": 0, "id": "c1",
+                        "function": {"name": "calculator_evaluate", "arguments": '{"expre'}}]}}]},
+        {"choices": [{"delta": {"tool_calls": [{"index": 0,
+                        "function": {"arguments": 'ssion": "1+1"}'}}]}}]},
+        {"choices": [{"delta": {}, "finish_reason": "tool_calls"}]},
+    ]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return _sse_response(chunks)
+
+    provider = OpenAICompatibleProvider(api_key="sk-test", transport=httpx.MockTransport(handler))
+    tool = ToolDescriptor(
+        name="calculator.evaluate", namespace="calculator", description="calc",
+        input_schema={"type": "object", "properties": {"expression": {"type": "string"}}},
+    )
+    tool_calls = None
+    async for ev in provider.stream(
+        ModelRequest(purpose="assistant", messages=[{"role": "user", "content": "1+1"}],
+                     tools=[tool.to_llm_schema()])
+    ):
+        if ev.type == "tool_call":
+            tool_calls = ev.tool_call
+    assert tool_calls is not None
+    fn = tool_calls[0]["function"]
+    assert fn["name"] == "calculator.evaluate"  # mapped back from sanitized
+    import json as _json
+    assert _json.loads(fn["arguments"]) == {"expression": "1+1"}

@@ -48,12 +48,23 @@ async def post_message(
     if services.runner is None:
         raise HTTPException(status_code=503, detail="Agent runner is not wired up")
 
-    run_result = await services.runner.start(
-        session_id=session_id,
-        owner_id=user.id,
-        user_input=body.text,
-        agent_id=agent_id,
-    )
+    # Prefer the non-blocking streaming start so the caller can subscribe to
+    # the live SSE stream; fall back to the blocking start when unavailable.
+    start_method = getattr(services.runner, "start_streaming", None)
+    if start_method is not None:
+        run_result = await start_method(
+            session_id=session_id,
+            owner_id=user.id,
+            user_input=body.text,
+            agent_id=agent_id,
+        )
+    else:
+        run_result = await services.runner.start(
+            session_id=session_id,
+            owner_id=user.id,
+            user_input=body.text,
+            agent_id=agent_id,
+        )
     run_id = UUID(str(run_result["run_id"]))
     run_status = run_result.get("status", "running")
 

@@ -470,7 +470,7 @@ class ModelUsage:
 
 class ModelResponse:
     __slots__ = ("content", "tool_calls", "model", "provider", "usage",
-                 "finish_reason", "latency_ms")
+                 "finish_reason", "latency_ms", "thinking")
 
     def __init__(
         self,
@@ -482,6 +482,7 @@ class ModelResponse:
         usage: ModelUsage | None = None,
         finish_reason: str = "stop",
         latency_ms: int = 0,
+        thinking: str | None = None,
     ):
         self.content = content
         self.tool_calls = tool_calls
@@ -490,6 +491,35 @@ class ModelResponse:
         self.usage = usage or ModelUsage()
         self.finish_reason = finish_reason
         self.latency_ms = latency_ms
+        #: Chain-of-thought (e.g. DeepSeek's reasoning_content, Qwen/Kimi/GLM
+        #: thinking). Provider-specific but normalized to a single field so the
+        #: runtime and UIs can show it uniformly; may be None.
+        self.thinking = thinking
+
+    @classmethod
+    def from_stream(
+        cls,
+        *,
+        model: str,
+        provider: str,
+        content_parts: list[str],
+        thinking_parts: list[str],
+        tool_calls: list[dict] | None,
+        usage: ModelUsage | None = None,
+        finish_reason: str = "stop",
+        latency_ms: int = 0,
+    ) -> ModelResponse:
+        """Assemble a response from streamed deltas."""
+        return cls(
+            content="".join(content_parts) if content_parts else None,
+            tool_calls=tool_calls,
+            model=model,
+            provider=provider,
+            usage=usage or ModelUsage(),
+            finish_reason=finish_reason,
+            latency_ms=latency_ms,
+            thinking="".join(thinking_parts) if thinking_parts else None,
+        )
 
 
 class ModelStreamEvent:

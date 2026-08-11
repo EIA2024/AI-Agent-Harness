@@ -1,8 +1,10 @@
-"""SSE streaming endpoint — replays a run's persisted steps as events.
+"""SSE streaming endpoint — live stream during execution, DB replay after.
 
-MVP implementation (blueprint §42): the stream reads ``run_steps`` from the DB
-in start order and emits ``run.started`` -> ``tool.*``/``text.delta`` ->
-``run.completed``. A live runner subscription can replace this later.
+For a run that is still executing (streaming started via
+``RunRunner.start_streaming``) the endpoint subscribes to the run's live event
+queue and forwards ``thinking.delta`` / ``text.delta`` / ``tool.*`` /
+``run.completed`` as they happen. Once a run has finished, the same endpoint
+replays its persisted ``run_steps`` (blueprint §42).
 """
 
 from __future__ import annotations
@@ -14,6 +16,7 @@ from fastapi import APIRouter, Depends
 from sqlalchemy import select
 from sse_starlette.sse import EventSourceResponse
 
+from personal_ai_os.agent_runtime import streams
 from personal_ai_os.db.models import Run, RunStep
 from personal_ai_os.db.session import session_scope
 
@@ -63,6 +66,19 @@ async def stream_run(run_id: UUID, user=Depends(resolve_user)):
             if run is None:
                 yield {"event": "error", "data": json.dumps({"detail": "Run not found"})}
                 return
+
+        # Live path: the run is currently executing and has a live queue.
+        live = streams.get(run_id)
+        if live is not None:
+            while True:
+                event = await live.get()
+                yield {"event": event["event"], "data": json.dumps(event["data"], ensure_ascii=False)}
+                if event["event"] in ("run.completed", "run.failed", "run.cancelled", "approval.required"):
+                    break
+            return
+
+        # Replay path: run already finished (or paused for approval).
+        async with session_scope() as s:
             steps_result = await s.execute(
                 select(RunStep)
                 .where(RunStep.run_id == run.id)
@@ -70,19 +86,36 @@ async def stream_run(run_id: UUID, user=Depends(resolve_user)):
             )
             steps = list(steps_result.scalars().all())
             status = run.status
+            state = run.state or {}
 
         yield {
             "event": "run.started",
             "data": json.dumps({"run_id": str(run.id), "status": status}, ensure_ascii=False),
         }
+        # Replay the chain-of-thought (not token-streamed after the fact, but
+        # surfaced so the CLI/UI shows it consistently for fast runs too).
+        thinking = state.get("thinking")
+        if thinking:
+            yield {
+                "event": "thinking.delta",
+                "data": json.dumps({"text": thinking, "replay": True}, ensure_ascii=False),
+            }
         for step in steps:
             event = _step_event(step)
             if event is not None:
                 yield event
+        final = state.get("final_response")
+        if final and status == "completed":
+            yield {
+                "event": "text.delta",
+                "data": json.dumps({"text": final, "replay": True}, ensure_ascii=False),
+            }
         if status == "completed":
             yield {"event": "run.completed", "data": json.dumps({"run_id": str(run.id)})}
         elif status == "failed":
             yield {"event": "run.failed", "data": json.dumps({"run_id": str(run.id)})}
+        elif status == "waiting_approval":
+            yield {"event": "approval.required", "data": json.dumps({"run_id": str(run.id)})}
         elif status == "cancelled":
             yield {"event": "run.cancelled", "data": json.dumps({"run_id": str(run.id)})}
 

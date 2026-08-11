@@ -182,3 +182,27 @@ class ModelRouter:
                 last_error = exc
                 continue
         raise ModelError(f"All providers failed for purpose={request.purpose!r}: {last_error}")
+
+    async def stream(self, request: ModelRequest):
+        """Stream from the selected provider when it supports streaming.
+
+        Falls back to a single ``complete()`` call surfaced as one ``done``
+        event when the provider has no ``stream`` method.
+        """
+        from ..common.models import ModelStreamEvent
+
+        provider, model = self.select(request)
+        routed = self._with_model(request, provider, model)
+        stream_method = getattr(provider, "stream", None)
+        if stream_method is not None:
+            async for event in stream_method(routed):
+                yield event
+            return
+        # Non-streaming provider: synthesize a single done event.
+        response = await provider.complete(routed)
+        yield ModelStreamEvent(
+            type="done",
+            text=response.content or "",
+            tool_call=response.tool_calls[0] if response.tool_calls else None,
+            usage=response.usage,
+        )

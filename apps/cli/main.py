@@ -87,10 +87,91 @@ def _print_reply(client: APIClient, run_id: str) -> None:
     print(f"  ⚠  Run {status}: {err.get('message') or err.get('code') or ''}".rstrip())
 
 
+# ANSI: dim/gray for the chain of thought, reset after.
+_DIM = "\033[90m"
+_RESET = "\033[0m"
+
+
+def _stream_run(client: APIClient, run_id: str, *, show_thinking: bool = True) -> None:
+    """Subscribe to the run's SSE stream and render events live.
+
+    Mirrors the streaming UX of Codex / Kimi / GLM CLIs: the chain of thought
+    streams dimmed, tool calls are announced, and the final answer types out.
+    Falls back to a plain fetch if the stream errors out.
+    """
+    import json as _json
+
+    saw_text = False
+    try:
+        with client._http.stream(
+            "GET",
+            f"{client.base_url}/v1/runs/{run_id}/stream",
+            headers={"X-API-Key": client.api_key},
+            timeout=300.0,
+        ) as resp:
+            if resp.status_code >= 400:
+                _print_reply(client, run_id)
+                return
+            event = None
+            data_buf: list[str] = []
+
+            def _flush() -> None:
+                nonlocal event, data_buf, saw_text
+                if event and data_buf:
+                    payload = _json.loads("\n".join(data_buf)) if data_buf else {}
+                    if event == "text.delta":
+                        saw_text = True
+                    _apply(event, payload, show_thinking)
+                event = None
+                data_buf = []
+
+            for raw in resp.iter_lines():
+                line = (raw or "").strip()
+                if line == "":
+                    _flush()
+                elif line.startswith("event:"):
+                    event = line[len("event:"):].strip()
+                elif line.startswith("data:"):
+                    data_buf.append(line[len("data:"):].strip())
+            _flush()  # stream may end without a trailing blank line
+    except Exception:  # noqa: BLE001 - fall back to non-streaming
+        _print_reply(client, run_id)
+        return
+
+    if not saw_text:
+        # The stream ended without a streamed answer (e.g. tool-only path that
+        # never emitted text.delta). Show the final reply from the run record.
+        _print_reply(client, run_id)
+
+
+def _apply(event: str, payload: dict, show_thinking: bool) -> bool:
+    """Render one SSE event; returns True for text/thinking deltas."""
+    if event == "thinking.delta":
+        if show_thinking:
+            sys.stdout.write(f"{_DIM}{payload.get('text', '')}{_RESET}")
+            sys.stdout.flush()
+        return True
+    if event == "text.delta":
+        sys.stdout.write(payload.get("text", ""))
+        sys.stdout.flush()
+        return True
+    if event == "tool.requested":
+        name = payload.get("tool_name", "")
+        sys.stdout.write(f"\n  ⚙  调用工具: {name}\n")
+        sys.stdout.flush()
+    elif event == "tool.completed" or event == "tool.failed":
+        pass  # keep it quiet; the tool call line is enough
+    elif event in ("run.completed", "run.failed", "approval.required", "run.cancelled"):
+        sys.stdout.write("\n")
+        sys.stdout.flush()
+    return False
+
+
 def cmd_chat(args: argparse.Namespace) -> None:
-    """Interactive chat: loop stdin -> POST message -> print result + reply."""
+    """Interactive chat: POST a message, then stream the run's response live."""
     client = APIClient()
     session_id = _ensure_session(client, args.session)
+    show_thinking = not getattr(args, "no_thinking", False)
 
     if not ProviderConfigStore().get_active() and sys.stdin.isatty():
         print("提示：服务器未配置 LLM provider（可能处于 demo 回显模式）。")
@@ -110,7 +191,7 @@ def cmd_chat(args: argparse.Namespace) -> None:
         status = resp.get("status", "running")
         print(f"[run {run_id} status={status}]")
         if run_id:
-            _print_reply(client, run_id)
+            _stream_run(client, run_id, show_thinking=show_thinking)
 
 
 def cmd_send(args: argparse.Namespace) -> None:
@@ -359,6 +440,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     chat = sub.add_parser("chat", help="start an interactive chat session")
     chat.add_argument("--session", help="existing session id (default: create one)")
+    chat.add_argument("--no-thinking", action="store_true",
+                      help="hide the model's chain of thought (thinking)")
     chat.set_defaults(func=cmd_chat)
 
     send = sub.add_parser("send", help="send a single message")

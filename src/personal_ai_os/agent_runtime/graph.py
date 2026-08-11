@@ -39,11 +39,13 @@ from langgraph.types import interrupt
 
 from personal_ai_os.agent_runtime.classifier import TaskClassifier
 from personal_ai_os.agent_runtime.planner import Planner
+from personal_ai_os.agent_runtime.streams import push as push_live
 from personal_ai_os.common.models import (
     AgentState,
     ApprovalRequiredError,
     MemoryCreate,
     ModelRequest,
+    ModelResponse,
     ToolExecutionContext,
 )
 from personal_ai_os.common.utils import idempotency_key
@@ -116,6 +118,63 @@ async def _available_tool_schemas(tool_broker: Any, state: dict) -> list[dict]:
     except Exception:
         logger.warning("Failed to list available tool schemas", exc_info=True)
         return []
+
+
+async def _model_call(deps: _Deps, state: dict, request: ModelRequest) -> ModelResponse:
+    """Call the model, streaming deltas to the run's live SSE when available.
+
+    When a live stream is registered for this run *and* the provider supports
+    ``stream``, token deltas (thinking + text) are pushed live while the full
+    :class:`ModelResponse` is accumulated. Otherwise it falls back to a plain
+    ``complete()`` call (e.g. tests / providers without streaming).
+    """
+    run_id = str(state.get("run_id") or "")
+    stream_method = getattr(deps.model_provider, "stream", None)
+
+    from personal_ai_os.agent_runtime import streams
+
+    if run_id and stream_method is not None and streams.get(run_id) is not None:
+        content_parts: list[str] = []
+        thinking_parts: list[str] = []
+        tool_calls: list[dict] | None = None
+        usage = None
+        try:
+            async for ev in stream_method(request):
+                if ev.type == "thinking_delta" and ev.text:
+                    thinking_parts.append(ev.text)
+                    push_live(run_id, "thinking.delta", {"text": ev.text})
+                elif ev.type == "text_delta" and ev.text:
+                    content_parts.append(ev.text)
+                    push_live(run_id, "text.delta", {"text": ev.text})
+                elif ev.type == "tool_call" and ev.tool_call:
+                    tool_calls = ev.tool_call
+                    first = tool_calls[0] if isinstance(tool_calls, list) else tool_calls
+                    fn = first.get("function", first) if isinstance(first, dict) else {}
+                    push_live(
+                        run_id, "tool.requested",
+                        {"tool_name": fn.get("name", ""), "tool_call": first},
+                    )
+                elif ev.type == "done":
+                    usage = ev.usage
+        except Exception:  # fall back to non-streaming on any stream failure
+            logger.warning("Model streaming failed for run %s; retrying non-streaming", run_id, exc_info=True)
+            return await deps.model_provider.complete(request)
+        response = ModelResponse.from_stream(
+            model=request.preferred_model or "model",
+            provider=getattr(deps.model_provider, "provider_name", "provider"),
+            content_parts=content_parts,
+            thinking_parts=thinking_parts,
+            tool_calls=tool_calls,
+            usage=usage,
+        )
+        # DeepSeek reasoning models require reasoning_content to be passed back
+        # verbatim on replay — keep it on the tool_call so observe can restore it.
+        if response.thinking and response.tool_calls:
+            for tc in response.tool_calls:
+                tc["reasoning_content"] = response.thinking
+        return response
+
+    return await deps.model_provider.complete(request)
 
 
 def _extract_tool_call_fields(pending: Any) -> tuple[str, dict]:
@@ -252,7 +311,7 @@ async def decide(state: AgentState, deps: _Deps) -> dict:
         messages=built["messages"],
         tools=tools or None,
     )
-    response = await deps.model_provider.complete(request)
+    response = await _model_call(deps, state, request)
     usage = _merge_usage(state.get("model_usage"), response.usage)
 
     tool_calls = response.tool_calls
@@ -269,6 +328,7 @@ async def decide(state: AgentState, deps: _Deps) -> dict:
         "pending_tool_call": None,
         "pending_response": {
             "content": response.content,
+            "thinking": response.thinking,
             "model": response.model,
             "provider": response.provider,
             "usage": response.usage.to_dict() if response.usage else None,
@@ -457,6 +517,7 @@ async def respond(state: AgentState, deps: _Deps) -> dict:
     """Produce the final assistant message (usually from ``pending_response``)."""
     pending = state.get("pending_response") or {}
     content = pending.get("content")
+    thinking = pending.get("thinking")
     usage = dict(state.get("model_usage") or {})
     if not content:
         # Fallback: generate directly (e.g. rejected approval path without content).
@@ -465,13 +526,15 @@ async def respond(state: AgentState, deps: _Deps) -> dict:
             built = cached
         else:
             built = await deps.context_engine.build(state)
-        response = await deps.model_provider.complete(
-            ModelRequest(purpose="respond", messages=built["messages"])
+        response = await _model_call(
+            deps, state, ModelRequest(purpose="respond", messages=built["messages"])
         )
         content = response.content
+        thinking = response.thinking
         usage = _merge_usage(usage, response.usage)
         pending = {
             "content": content,
+            "thinking": thinking,
             "model": response.model,
             "provider": response.provider,
             "usage": response.usage.to_dict() if response.usage else None,
@@ -484,6 +547,7 @@ async def respond(state: AgentState, deps: _Deps) -> dict:
         "messages": messages,
         "pending_response": None,
         "final_response": content,
+        "thinking": thinking,
         "model_usage": usage,
     }
 

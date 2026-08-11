@@ -12,6 +12,7 @@ Error normalisation: any upstream failure is surfaced as ``ModelError`` so the
 
 from __future__ import annotations
 
+import json
 import os
 import time
 from typing import Any
@@ -19,7 +20,7 @@ from typing import Any
 import anthropic
 import httpx
 
-from ..common.models import ModelError, ModelRequest, ModelResponse, ModelUsage
+from ..common.models import ModelError, ModelRequest, ModelResponse, ModelStreamEvent, ModelUsage
 
 # ---------------------------------------------------------------------------
 # Anthropic pricing (USD per 1M tokens, approximate). Used for cost tracking.
@@ -351,13 +352,18 @@ class OpenAICompatibleProvider:
     def _headers(self) -> dict:
         return {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
 
-    async def complete(self, request: ModelRequest) -> ModelResponse:
+    def _build_payload(self, request: ModelRequest, *, stream: bool = False) -> tuple[dict, dict]:
+        """Build the chat/completions payload plus a sanitized->original tool-name
+        map for round-tripping. Shared by ``complete`` and ``stream``."""
         model = request.preferred_model or self.default_model
         payload: dict[str, Any] = {
             "model": model,
             "messages": _sanitize_messages(request.messages),
             "max_tokens": request.max_tokens or 1024,
         }
+        if stream:
+            payload["stream"] = True
+            payload["stream_options"] = {"include_usage": True}
         if request.temperature is not None:
             payload["temperature"] = request.temperature
 
@@ -367,17 +373,17 @@ class OpenAICompatibleProvider:
         name_map: dict[str, str] = {}
         if request.tools:
             payload["tools"] = []
+            import copy
+
             for tool in request.tools:
                 fn = tool.get("function", tool) if isinstance(tool, dict) else tool
-                original = fn.get("name")
+                original = fn.get("name") if isinstance(fn, dict) else None
                 if not original:
                     payload["tools"].append(tool)
                     continue
                 sanitized = _sanitize_tool_name(original)
                 if sanitized != original:
                     name_map[sanitized] = original
-                    import copy
-
                     adjusted = copy.deepcopy(tool)
                     adjusted_fn = adjusted.get("function", adjusted) if isinstance(adjusted, dict) else adjusted
                     if isinstance(adjusted_fn, dict):
@@ -387,6 +393,22 @@ class OpenAICompatibleProvider:
                     payload["tools"].append(tool)
         if request.response_format:
             payload["response_format"] = request.response_format
+        return payload, name_map
+
+    @staticmethod
+    def _map_tool_names(tool_calls: list[dict] | None, name_map: dict) -> list[dict] | None:
+        if not tool_calls or not name_map:
+            return tool_calls
+        for tc in tool_calls:
+            if isinstance(tc, dict):
+                fn = tc.get("function")
+                if isinstance(fn, dict) and fn.get("name") in name_map:
+                    fn["name"] = name_map[fn["name"]]
+        return tool_calls
+
+    async def complete(self, request: ModelRequest) -> ModelResponse:
+        model = request.preferred_model or self.default_model
+        payload, name_map = self._build_payload(request, stream=False)
 
         started = time.monotonic()
         try:
@@ -416,13 +438,7 @@ class OpenAICompatibleProvider:
         choice = (data.get("choices") or [{}])[0]
         message = choice.get("message") or {}
         content = message.get("content")
-        tool_calls = message.get("tool_calls") or None
-        if tool_calls and name_map:
-            for tc in tool_calls:
-                if isinstance(tc, dict):
-                    fn = tc.get("function")
-                    if isinstance(fn, dict) and fn.get("name") in name_map:
-                        fn["name"] = name_map[fn["name"]]
+        tool_calls = self._map_tool_names(message.get("tool_calls") or None, name_map)
         # DeepSeek reasoning models require `reasoning_content` to be passed back
         # verbatim when the assistant's tool-call frame is replayed next turn.
         # Stash it on the tool_call dict so the runtime can persist it.
@@ -457,6 +473,111 @@ class OpenAICompatibleProvider:
             ),
             finish_reason=finish_reason,
             latency_ms=latency_ms,
+        )
+
+    async def stream(self, request: ModelRequest):
+        """Stream a chat completion as SSE deltas.
+
+        Yields :class:`ModelStreamEvent` items: ``thinking_delta`` (reasoning
+        content), ``text_delta``, one ``tool_call`` when tool use completes,
+        then ``done``. Any non-2xx response raises :class:`ModelError`.
+        """
+
+        model = request.preferred_model or self.default_model
+        payload, name_map = self._build_payload(request, stream=True)
+
+        client_kwargs: dict[str, Any] = {"timeout": httpx.Timeout(300)}
+        if self._transport is not None:
+            client_kwargs["transport"] = self._transport
+
+        content_parts: list[str] = []
+        thinking_parts: list[str] = []
+        tool_call_acc: dict[int, dict] = {}
+        finish_reason = "stop"
+        usage_raw: dict = {}
+
+        try:
+            async with httpx.AsyncClient(**client_kwargs) as client:
+                async with client.stream(
+                    "POST", f"{self.base_url}/chat/completions", json=payload, headers=self._headers()
+                ) as response:
+                    if response.status_code >= 400:
+                        body = await response.aread()
+                        raise ModelError(
+                            f"OpenAI-compatible endpoint returned HTTP {response.status_code} "
+                            f"for model {model!r}: {body[:500]!r}"
+                        )
+                    async for line in response.aiter_lines():
+                        if not line.startswith("data:"):
+                            continue
+                        data = line[len("data:"):].strip()
+                        if data == "[DONE]":
+                            break
+                        try:
+                            chunk = json.loads(data)
+                        except json.JSONDecodeError:
+                            continue
+                        choice = (chunk.get("choices") or [{}])[0]
+                        delta = choice.get("delta") or {}
+
+                        reasoning = delta.get("reasoning_content")
+                        if reasoning:
+                            thinking_parts.append(reasoning)
+                            yield ModelStreamEvent(type="thinking_delta", text=reasoning)
+
+                        text = delta.get("content")
+                        if text:
+                            content_parts.append(text)
+                            yield ModelStreamEvent(type="text_delta", text=text)
+
+                        for tc in delta.get("tool_calls") or []:
+                            idx = int(tc.get("index", 0))
+                            acc = tool_call_acc.setdefault(idx, {"id": None, "function": {"name": None, "arguments": ""}})
+                            if tc.get("id"):
+                                acc["id"] = tc["id"]
+                            fn = tc.get("function") or {}
+                            if fn.get("name"):
+                                acc["function"]["name"] = fn["name"]
+                            if fn.get("arguments"):
+                                acc["function"]["arguments"] += fn.get("arguments") or ""
+
+                        if choice.get("finish_reason"):
+                            finish_reason = choice["finish_reason"]
+                        if chunk.get("usage"):
+                            usage_raw = chunk["usage"]
+        except ModelError:
+            raise
+        except Exception as exc:  # normalise upstream errors
+            raise ModelError(f"OpenAI-compatible stream failed: {exc}") from exc
+
+        tool_calls = None
+        if tool_call_acc:
+            tool_calls = [
+                {
+                    "id": acc["id"],
+                    "type": "function",
+                    "function": {"name": acc["function"]["name"], "arguments": acc["function"]["arguments"]},
+                }
+                for idx, acc in sorted(tool_call_acc.items())
+            ]
+            tool_calls = self._map_tool_names(tool_calls, name_map)
+            reasoning = "".join(thinking_parts)
+            if reasoning:
+                for tc in tool_calls:
+                    tc["reasoning_content"] = reasoning
+            yield ModelStreamEvent(type="tool_call", tool_call=tool_calls)
+
+        usage = ModelUsage(
+            input_tokens=int(usage_raw.get("prompt_tokens", 0) or 0),
+            output_tokens=int(usage_raw.get("completion_tokens", 0) or 0),
+        )
+        if finish_reason == "tool_calls":
+            pass  # tool_call event already emitted above
+        yield ModelStreamEvent(
+            type="done",
+            text="".join(content_parts),
+            tool_call=tool_calls,
+            usage=usage,
         )
 
     async def health_check(self) -> bool:
