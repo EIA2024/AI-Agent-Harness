@@ -24,6 +24,7 @@ Semantics of each fixture (see also the module docstring per file):
 from __future__ import annotations
 
 import json
+from datetime import UTC
 from pathlib import Path
 from typing import Any
 
@@ -85,3 +86,37 @@ def _flush(
         return
     payload = json.loads("\n".join(data_lines))
     out.append((event, payload))
+
+
+def reduce_fixture(
+    name: str,
+    *,
+    show_reasoning: bool = False,
+    session_id: str = "s1",
+    run_id: str = "r1",
+    ts: Any = None,
+) -> Any:
+    """Replay a fixture through decoder → normalizer → reducer.
+
+    Returns the resulting :class:`~personal_ai_os.cli.domain.state.AppState`.
+    Pass a fixed ``ts`` (datetime) for fully deterministic replay.
+    """
+    from datetime import datetime
+
+    from personal_ai_os.cli.api.sse import SSEDecoder
+    from personal_ai_os.cli.domain.normalizer import Normalizer
+    from personal_ai_os.cli.domain.reducer import reduce
+    from personal_ai_os.cli.domain.state import initial_state
+
+    body = load_raw(name)
+    decoder = SSEDecoder()
+    state = initial_state(session_id=session_id)
+    normalizer = Normalizer(show_reasoning=show_reasoning)
+    fixed_ts = ts if ts is not None else datetime(2026, 1, 1, tzinfo=UTC)
+    server_events: list[tuple[str, dict[str, Any]]] = []
+    for line in body.splitlines(keepends=False):
+        server_events.extend(decoder.feed_line(line))
+    server_events.extend(decoder.finish())
+    for se in server_events:
+        reduce(state, normalizer.normalize(se, run_id=run_id, ts=fixed_ts))
+    return state

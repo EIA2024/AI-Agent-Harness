@@ -21,6 +21,7 @@ def _run_cli(*args: str) -> subprocess.CompletedProcess:
         cwd=ROOT,
         capture_output=True,
         text=True,
+        encoding="utf-8",
         env=_env(),
         timeout=60,
     )
