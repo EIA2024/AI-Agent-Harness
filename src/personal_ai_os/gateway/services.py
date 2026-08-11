@@ -125,14 +125,59 @@ def build_default_services() -> ServiceContainer:
     # -- model gateway ------------------------------------------------------
 
     def _model_provider():
-        from personal_ai_os.model_gateway import EchoProvider, ModelRouter
+        from personal_ai_os.model_gateway import (
+            EchoProvider,
+            ModelRouter,
+            ProviderConfigStore,
+        )
 
+        profile = ProviderConfigStore().get_active()
+
+        if profile is not None:
+            if profile.format == "openai":
+                from personal_ai_os.model_gateway import OpenAICompatibleProvider
+
+                provider = OpenAICompatibleProvider(
+                    api_key=profile.api_key,
+                    base_url=profile.base_url or "https://api.openai.com/v1",
+                    default_model=profile.model or "gpt-4o-mini",
+                )
+                logger.info(
+                    "Using provider profile %r (%s, %s)",
+                    profile.name, profile.format, provider.base_url,
+                )
+            elif profile.format == "anthropic":
+                from personal_ai_os.model_gateway import AnthropicProvider
+
+                provider = AnthropicProvider(
+                    api_key=profile.api_key,
+                    default_model=profile.model or "claude-haiku-4-5",
+                )
+                logger.info("Using provider profile %r (anthropic)", profile.name)
+            else:
+                return EchoProvider()
+            # Route every purpose to the profile's single model.
+            model = getattr(provider, "default_model", "default")
+            config = {
+                "roles": {
+                    "router": [model],
+                    "worker": [model],
+                    "vision": [model],
+                    "embedding": [],
+                }
+            }
+            return ModelRouter(providers={"primary": provider}, config=config)
+
+        # No profile configured → fall back to env key, else demo echo.
         api_key = os.getenv("ANTHROPIC_API_KEY")
         if api_key:
             from personal_ai_os.model_gateway import AnthropicProvider
+
             return ModelRouter(providers={"anthropic": AnthropicProvider(api_key=api_key)})
-        # No API key -> echo provider so the system runs end-to-end in demo mode.
-        logger.info("ANTHROPIC_API_KEY not set; using EchoProvider (demo mode)")
+        logger.warning(
+            "No LLM provider profile configured (run `personal-ai config init`); "
+            "using EchoProvider demo mode."
+        )
         return EchoProvider()
 
     container.model_provider = _lazy(_model_provider)

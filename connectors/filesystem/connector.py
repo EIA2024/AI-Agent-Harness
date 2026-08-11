@@ -243,7 +243,6 @@ class FilesystemConnector:
                 if os.path.commonpath([root, os.path.normcase(real_full)]) != root:
                     continue
                 is_dir = os.path.isdir(full)
-                basename = os.path.basename(real_full)
                 entries.append(
                     {
                         "name": name,

@@ -17,6 +17,7 @@ import time
 from typing import Any
 
 import anthropic
+import httpx
 
 from ..common.models import ModelError, ModelRequest, ModelResponse, ModelUsage
 
@@ -270,6 +271,124 @@ class AnthropicProvider:
                 messages=[{"role": "user", "content": "ping"}],
             )
             return True
+        except Exception:
+            return False
+
+
+# ---------------------------------------------------------------------------
+# OpenAICompatibleProvider
+# ---------------------------------------------------------------------------
+
+
+class OpenAICompatibleProvider:
+    """OpenAI-compatible ``/chat/completions`` adapter.
+
+    Works with OpenAI, DeepSeek, Moonshot/Kimi, Zhipu GLM, Qwen, and any
+    service exposing the OpenAI chat-completions schema. Uses plain ``httpx``
+    so no extra SDK dependency is required.
+
+    ``base_url`` is the API root — ``/chat/completions`` is appended.
+    e.g. ``https://api.openai.com/v1`` or ``https://api.deepseek.com/v1``.
+    ``request.messages`` and ``request.tools`` are already in OpenAI format
+    (system/user/assistant/tool roles + function schemas), so they pass through
+    as-is; tool calls come back in the native OpenAI shape, which the runtime's
+    ``_extract_tool_call_fields`` already parses.
+    """
+
+    provider_name = "openai_compatible"
+
+    #: wildcard — the model is chosen per profile, not from a fixed list
+    models: list[str] | None = None
+
+    def __init__(
+        self,
+        *,
+        api_key: str,
+        base_url: str = "https://api.openai.com/v1",
+        default_model: str = "gpt-4o-mini",
+        transport: httpx.AsyncBaseTransport | None = None,
+    ):
+        self.api_key = api_key
+        self.base_url = base_url.rstrip("/")
+        self.default_model = default_model
+        self._transport = transport
+
+    def _headers(self) -> dict:
+        return {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
+
+    async def complete(self, request: ModelRequest) -> ModelResponse:
+        model = request.preferred_model or self.default_model
+        payload: dict[str, Any] = {
+            "model": model,
+            "messages": request.messages,
+            "max_tokens": request.max_tokens or 1024,
+        }
+        if request.temperature is not None:
+            payload["temperature"] = request.temperature
+        if request.tools:
+            payload["tools"] = request.tools  # already OpenAI function schemas
+        if request.response_format:
+            payload["response_format"] = request.response_format
+
+        started = time.monotonic()
+        try:
+            client_kwargs: dict[str, Any] = {"timeout": httpx.Timeout(120)}
+            if self._transport is not None:
+                client_kwargs["transport"] = self._transport
+            async with httpx.AsyncClient(**client_kwargs) as client:
+                response = await client.post(
+                    f"{self.base_url}/chat/completions", json=payload, headers=self._headers()
+                )
+                response.raise_for_status()
+                data = response.json()
+        except ModelError:
+            raise
+        except Exception as exc:  # normalise upstream errors
+            raise ModelError(f"OpenAI-compatible request failed: {exc}") from exc
+        latency_ms = int((time.monotonic() - started) * 1000)
+
+        choice = (data.get("choices") or [{}])[0]
+        message = choice.get("message") or {}
+        content = message.get("content")
+        tool_calls = message.get("tool_calls") or None
+
+        usage_raw = data.get("usage") or {}
+        cached_tokens = 0
+        details = usage_raw.get("prompt_tokens_details")
+        if isinstance(details, dict):
+            cached_tokens = int(details.get("cached_tokens", 0) or 0)
+
+        finish = choice.get("finish_reason") or "stop"
+        finish_map = {"tool_calls": "tool_calls", "length": "length", "stop": "stop"}
+        finish_reason = finish_map.get(finish, "stop")
+
+        return ModelResponse(
+            content=content if content else None,
+            tool_calls=tool_calls,
+            model=model,
+            provider=self.provider_name,
+            usage=ModelUsage(
+                input_tokens=int(usage_raw.get("prompt_tokens", 0) or 0),
+                cached_tokens=cached_tokens,
+                output_tokens=int(usage_raw.get("completion_tokens", 0) or 0),
+                # Pricing differs wildly per provider (OpenAI vs DeepSeek);
+                # cost estimation is left to the budget layer / future config.
+                cost_usd=0.0,
+            ),
+            finish_reason=finish_reason,
+            latency_ms=latency_ms,
+        )
+
+    async def health_check(self) -> bool:
+        try:
+            client_kwargs: dict[str, Any] = {"timeout": httpx.Timeout(10)}
+            if self._transport is not None:
+                client_kwargs["transport"] = self._transport
+            async with httpx.AsyncClient(**client_kwargs) as client:
+                response = await client.get(
+                    f"{self.base_url}/models", headers={"Authorization": f"Bearer {self.api_key}"}
+                )
+                return response.status_code < 400
         except Exception:
             return False
 

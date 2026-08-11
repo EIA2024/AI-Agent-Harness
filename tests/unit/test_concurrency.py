@@ -22,18 +22,18 @@ from personal_ai_os.tool_broker import ToolBroker, ToolRegistry
 
 
 class DelayedModel:
-    """Returns a distinct reply per call; sleeps to widen the race window."""
-
-    def __init__(self, replies: dict[int, str]):
-        self.replies = replies
-        self.calls = 0
+    """Replies with the user's own text (after a short sleep to widen the race
+    window), so each concurrent run's reply is deterministic and independent of
+    which run's model call happens to land first."""
 
     async def complete(self, request: ModelRequest) -> ModelResponse:
-        idx = self.calls
-        self.calls += 1
         await asyncio.sleep(0.05)  # widen interleaving
+        user_text = ""
+        for msg in request.messages or []:
+            if msg.get("role") == "user":
+                user_text = str(msg.get("content", ""))
         return ModelResponse(
-            content=self.replies.get(idx, "default"),
+            content=f"echo:{user_text}",
             tool_calls=None, model="fake", provider="fake",
             usage=ModelUsage(input_tokens=1, output_tokens=1),
         )
@@ -55,7 +55,7 @@ async def _make_runner() -> tuple[RunRunner, DelayedModel]:
     for c in get_builtin_connectors():
         await broker.register_connector(c)
 
-    model = DelayedModel({0: "reply-A", 1: "reply-B"})
+    model = DelayedModel()
     memory = SQLMemoryStore(embedding_provider=DeterministicEmbedding(), event_bus=event_bus)
     ctx = ContextEngine(memory_store=memory, tool_registry=broker._registry)
     graph = build_graph(context_engine=ctx, model_provider=model, tool_broker=broker, memory_store=memory)
@@ -112,8 +112,8 @@ async def test_concurrent_runs_do_not_cross_contaminate(tmp_path):
     async with session_scope() as s:
         r1 = await s.get(Run, uuid.UUID(results[0]["id"]))
         r2 = await s.get(Run, uuid.UUID(results[1]["id"]))
-        assert r1.state["final_response"] == "reply-A"
-        assert r2.state["final_response"] == "reply-B"
+        assert r1.state["final_response"] == "echo:task one"
+        assert r2.state["final_response"] == "echo:task two"
         # each run's messages are only its own
         for run_id, text in ((r1.id, "task one"), (r2.id, "task two")):
             msgs = (await s.execute(select(Message).where(Message.run_id == run_id))).scalars().all()

@@ -25,8 +25,10 @@ User → Gateway/Session → Agent Runtime (LangGraph)
 # 1. 安装依赖
 uv sync --extra dev
 
-# 2. 配置（复制并按需修改）
-cp .env.example .env
+# 2. 配置 LLM Provider（OpenAI/Anthropic/DeepSeek/...，支持多套切换）
+uv run python -m apps.cli.main config init
+#    → 交互式向导：选择请求格式（OpenAI 兼容 / Anthropic）、Base URL、API Key、模型
+#    → 配置保存在 ~/.personal_ai/profiles.json（仓库外，不会进入 git）
 
 # 3. 启动 API（默认 SQLite）
 uv run python -m apps.api.main
@@ -38,7 +40,28 @@ export PERSONAL_AI_API_KEY=dev-key
 uv run python -m apps.cli.main chat
 ```
 
-> 无 LLM API Key 时，可将模型指向 Echo/Fake provider（见 `model_gateway`），系统仍可完整跑通状态机与工具链路。
+> 未配置任何 Provider 时系统以 EchoProvider（demo 回显）模式运行，链路完整但 Agent 不会真正推理。
+
+### 多套 Provider 切换
+
+```bash
+uv run python -m apps.cli.main config list          # 查看已保存的配置
+uv run python -m apps.cli.main config show          # 查看当前生效的配置
+uv run python -m apps.cli.main config use <name>    # 切换到另一套
+uv run python -m apps.cli.main config edit <name>   # 修改 URL/模型/Key
+uv run python -m apps.cli.main config remove <name> # 删除
+# 切换后重启 API 服务生效
+```
+
+支持的格式：`openai`（OpenAI / DeepSeek / Moonshot / GLM / Qwen / Ollama 等任何 chat-completions 兼容服务）与 `anthropic`（Claude 官方）。
+
+### 记忆与 Provider 切换（调研结论）
+
+**切换聊天模型（OpenAI ⇄ Anthropic ⇄ DeepSeek 等）不会丢失任何记忆。** 长期记忆存储在本地数据库（`memories` 表）的 `memories`/`memory_links` 表，与 LLM 厂商无关——换 Provider 只是换"大脑"，记忆仍在。
+
+一个需要了解的细节是**嵌入向量**：检索用向量做相似度排序。本系统 MVP 用**确定性哈希嵌入**（不依赖任何外部 API，可复现），因此切换 Provider 完全无影响。若未来接入真实嵌入模型，需注意**不同嵌入模型的向量空间不兼容**——切换嵌入模型需对存量记忆重嵌入（行业共识，见 [Qdrant 嵌入迁移指南](https://qdrant.tech/documentation/tutorials-operations/embedding-model-migration/)、[Mixpeek 嵌入可移植性](https://mixpeek.com/guides/embedding-portability-versioning)）。因当前不持久化向量、检索时实时计算，切换不会损坏数据，只是相似度口径可能变化。
+
+**结论：记忆在 Provider 之间完全共享；切换聊天 API 是安全的。**
 
 ## 运行测试
 

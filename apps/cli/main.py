@@ -23,6 +23,8 @@ import sys
 
 import httpx
 
+from personal_ai_os.model_gateway import KNOWN_PROVIDERS, ProviderConfigStore, ProviderProfile
+
 API_URL = os.environ.get("PERSONAL_AI_API_URL", "http://localhost:8000")
 API_KEY = os.environ.get("PERSONAL_AI_API_KEY", "dev-key")
 
@@ -86,6 +88,13 @@ def cmd_chat(args: argparse.Namespace) -> None:
     """Interactive chat: loop stdin -> POST message -> print result + reply."""
     client = APIClient()
     session_id = _ensure_session(client, args.session)
+
+    if not ProviderConfigStore().get_active() and sys.stdin.isatty():
+        print("提示：服务器未配置 LLM provider（可能处于 demo 回显模式）。")
+        print("      运行 `personal-ai config init` 配置 OpenAI/Anthropic/DeepSeek 等，")
+        print("      然后重启 API 服务即可用真实模型。")
+        print()
+
     while True:
         try:
             text = input("> ")
@@ -180,6 +189,164 @@ def cmd_approve(args: argparse.Namespace) -> None:
     print(json.dumps(resp, ensure_ascii=False))
 
 
+# ---------------------------------------------------------------------------
+# config — local provider profiles (multi-API, secrets stay out of git)
+# ---------------------------------------------------------------------------
+
+
+def _prompt(text: str, default: str | None = None) -> str:
+    suffix = f" [{default}]" if default is not None else ""
+    try:
+        value = input(f"{text}{suffix} ")
+    except (EOFError, KeyboardInterrupt):
+        raise SystemExit(130)
+    value = value.strip()
+    return value or (default or "")
+
+
+def _prompt_secret(text: str) -> str:
+    """Prompt for a secret, hiding input when possible (falls back to plain)."""
+    try:
+        import getpass
+
+        value = getpass.getpass(f"{text} ")
+    except (EOFError, KeyboardInterrupt):
+        raise SystemExit(130)
+    except Exception:  # noqa: BLE001 - non-tty fallback
+        return _prompt(text)
+    return value.strip()
+
+
+def _wizard_init() -> None:
+    store = ProviderConfigStore()
+    print("=== Personal AI OS · LLM Provider 配置向导 ===")
+    print("本配置保存在本地（仓库外），不会进入 GitHub。")
+    print()
+    print("选择 API 请求格式：")
+    print("  1. OpenAI 兼容格式 — OpenAI / DeepSeek / Moonshot(Kimi) / GLM / Qwen / Ollama ...")
+    print("  2. Anthropic 格式 — Claude 官方 API")
+    choice = _prompt("选择", "1")
+    if choice == "2":
+        fmt, base_url, def_model = "anthropic", "", "claude-sonnet-5"
+        preset = KNOWN_PROVIDERS["anthropic"]
+    else:
+        fmt = "openai"
+        print()
+        print("常用提供商（可输入序号，或直接回车用 OpenAI）：")
+        openai_names = [k for k, v in KNOWN_PROVIDERS.items() if v["format"] == "openai"]
+        for i, name in enumerate(openai_names, 1):
+            p = KNOWN_PROVIDERS[name]
+            print(f"  {i}. {name:<10} {p['base_url']}")
+        pick = _prompt("选择序号或留空", "")
+        if pick and pick.isdigit() and 1 <= int(pick) <= len(openai_names):
+            preset = KNOWN_PROVIDERS[openai_names[int(pick) - 1]]
+        else:
+            preset = KNOWN_PROVIDERS["openai"]
+        base_url = preset["base_url"]
+        def_model = preset["model"]
+        if pick and not pick.isdigit():
+            print(f"未识别的选择 {pick!r}，使用 OpenAI 默认值。")
+        print()
+        custom_url = _prompt(f"Base URL（API 根地址，默认 {base_url}）", base_url)
+        base_url = custom_url or base_url
+        custom_model = _prompt(f"默认模型（默认 {def_model}）", def_model)
+        def_model = custom_model or def_model
+
+    print()
+    name = _prompt("配置名称（便于多套切换）", "main")
+    api_key = _prompt_secret("API Key")
+    if not api_key:
+        print("未输入 API Key，取消配置。", file=sys.stderr)
+        raise SystemExit(1)
+
+    profile = ProviderProfile(
+        name=name,
+        format=fmt,
+        api_key=api_key,
+        base_url=base_url,
+        model=def_model,
+    )
+    store.add(profile, activate=True)
+    print()
+    print(f"✅ 已保存配置「{name}」（{fmt}，{base_url}）并设为当前使用。")
+    print("   重启 API 服务后生效；用 `personal-ai config list/use` 切换多套配置。")
+
+
+def cmd_config(args: argparse.Namespace) -> None:
+    store = ProviderConfigStore()
+    action = args.action
+
+    if action == "init":
+        _wizard_init()
+        return
+
+    if action == "list":
+        profiles = store.list_profiles()
+        active = store.get_active_name()
+        if not profiles:
+            print("尚未配置任何 provider。运行 `personal-ai config init` 开始。")
+            return
+        print(f"{'名称':<12}{'格式':<10}{'模型':<16}{'Base URL':<40}Key")
+        for p in profiles:
+            marker = "▶ " if p.name == active else "  "
+            print(f"{marker}{p.name:<10}{p.format:<10}{(p.model or '-'):<16}{(p.base_url or '-')[:38]:<40}{p.masked_key()}")
+        return
+
+    if action == "use":
+        if store.set_active(args.name):
+            print(f"已切换到「{args.name}」。")
+        else:
+            print(f"未找到配置「{args.name}」。运行 `personal-ai config list` 查看。", file=sys.stderr)
+            raise SystemExit(1)
+        return
+
+    if action == "show":
+        p = store.get_active()
+        if p is None:
+            print("未设置当前 provider。运行 `personal-ai config init`。")
+            return
+        print(f"名称      : {p.name}")
+        print(f"格式      : {p.format}")
+        print(f"Base URL  : {p.base_url or '-'}")
+        print(f"模型      : {p.model or '-'}")
+        print(f"API Key   : {p.masked_key()}")
+        print(f"更新于    : {p.updated_at}")
+        return
+
+    if action == "edit":
+        profile = store.get(args.name)
+        if profile is None:
+            print(f"未找到配置「{args.name}」。", file=sys.stderr)
+            raise SystemExit(1)
+        fields: dict = {}
+        new_url = _prompt(f"Base URL（当前 {profile.base_url or '-'}）", "")
+        if new_url:
+            fields["base_url"] = new_url
+        new_model = _prompt(f"模型（当前 {profile.model or '-'}）", "")
+        if new_model:
+            fields["model"] = new_model
+        new_key = _prompt_secret("新 API Key（留空保持不变）")
+        if new_key:
+            fields["api_key"] = new_key
+        if fields:
+            store.update(args.name, **fields)
+            print(f"已更新「{args.name}」。")
+        else:
+            print("未做任何修改。")
+        return
+
+    if action == "remove":
+        if store.remove(args.name):
+            print(f"已删除「{args.name}」。")
+        else:
+            print(f"未找到配置「{args.name}」。", file=sys.stderr)
+            raise SystemExit(1)
+        return
+
+    print(f"未知操作: {action}", file=sys.stderr)
+    raise SystemExit(2)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="personal-ai",
@@ -226,6 +393,28 @@ def build_parser() -> argparse.ArgumentParser:
     approve.add_argument("--list", action="store_true", help="list pending approvals")
     approve.add_argument("approval_id", nargs="?", help="approval id to approve")
     approve.set_defaults(func=cmd_approve)
+
+    config = sub.add_parser(
+        "config",
+        help="manage local LLM provider profiles (multi-API switching)",
+        description=(
+            "Profiles are stored locally outside the repo (secrets never enter git). "
+            "Formats: openai (compatible: OpenAI/DeepSeek/Kimi/GLM/Qwen/Ollama) or anthropic."
+        ),
+    )
+    config_sub = config.add_subparsers(dest="action", required=True)
+    config_sub.add_parser("init", help="interactive first-run wizard").set_defaults(func=cmd_config)
+    config_sub.add_parser("list", help="list saved profiles").set_defaults(func=cmd_config)
+    config_sub.add_parser("show", help="show the active profile").set_defaults(func=cmd_config)
+    use = config_sub.add_parser("use", help="switch the active profile")
+    use.add_argument("name")
+    use.set_defaults(func=cmd_config)
+    edit = config_sub.add_parser("edit", help="edit a profile (url/model/key)")
+    edit.add_argument("name")
+    edit.set_defaults(func=cmd_config)
+    remove = config_sub.add_parser("remove", help="delete a profile")
+    remove.add_argument("name")
+    remove.set_defaults(func=cmd_config)
 
     return parser
 

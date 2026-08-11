@@ -28,6 +28,7 @@ part of the public contract.
 from __future__ import annotations
 
 import json
+import logging
 import uuid
 from functools import partial
 from typing import Any
@@ -46,6 +47,8 @@ from personal_ai_os.common.models import (
     ToolExecutionContext,
 )
 from personal_ai_os.common.utils import idempotency_key
+
+logger = logging.getLogger(__name__)
 
 
 class RuntimeState(AgentState, total=False):

@@ -11,7 +11,6 @@ from personal_ai_os.db.models import User
 from personal_ai_os.db.session import session_scope
 from personal_ai_os.gateway.services import ServiceContainer
 
-
 _TEST_KEY = "tools-test-key"
 
 
