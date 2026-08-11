@@ -49,19 +49,10 @@ def _root(ctx: typer.Context) -> None:
 
 
 def _interactive() -> None:
-    """Interactive chat loop (Phase 1: legacy input loop; Phase 2: TUI)."""
-    try:
-        from personal_ai_os.cli import tui
-    except ImportError:  # pragma: no cover - TUI not yet installed
-        tui = None  # type: ignore[assignment]
-    if tui is not None and hasattr(tui, "run_app"):
-        tui.run_app()
-        return
-    import argparse
+    """Interactive UI: Textual TUI with a plain non-TTY fallback."""
+    from personal_ai_os.cli.tui import run_app
 
-    from personal_ai_os.cli.legacy import cmd_chat
-
-    cmd_chat(argparse.Namespace(session=None, no_thinking=False))
+    run_app()
 
 
 # ---------------------------------------------------------------------------
