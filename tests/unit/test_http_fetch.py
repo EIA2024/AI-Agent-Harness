@@ -188,3 +188,20 @@ class TestResponseSize:
         assert result.truncated is True
         assert len(result.data["body"]) == 200
         assert len(result.text) == 200
+
+
+def test_html_to_text_strips_markup():
+    """HTML is converted to readable text (no script/style markup leaking)."""
+    from connectors.http_fetch.connector import html_to_text
+
+    raw = (
+        '<html><head><style>.x{color:red}</style></head><body>'
+        '<script>alert("x")</script>'
+        '<h1>标题</h1><p>第一段 &amp; 内容</p><div>第二段</div>'
+        '<ul><li>项目一</li><li>项目二</li></ul></body></html>'
+    )
+    text = html_to_text(raw)
+    assert "script" not in text and "alert" not in text
+    assert "style" not in text and "color:red" not in text
+    assert "标题" in text and "第一段 & 内容" in text and "项目一" in text
+    assert text.startswith("标题") or "标题" in text

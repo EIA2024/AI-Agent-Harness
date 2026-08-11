@@ -15,10 +15,13 @@ so no real network traffic is ever emitted.
 from __future__ import annotations
 
 import asyncio
+import html as html_lib
 import ipaddress
 import logging
+import re
 import socket
 import time
+from html.parser import HTMLParser
 from typing import Any
 from urllib.parse import urlparse
 
@@ -70,6 +73,51 @@ def _resolve_private(host: str) -> bool:
         if _is_private_ip(info[4][0]):
             return True
     return False
+
+
+class _TextExtractor(HTMLParser):
+    """Pulls readable text out of HTML, dropping script/style/noscript content."""
+
+    _BLOCK_TAGS = {"p", "div", "br", "li", "tr", "h1", "h2", "h3", "h4", "pre", "blockquote"}
+    _SKIP_TAGS = {"script", "style", "noscript", "template", "svg"}
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.parts: list[str] = []
+        self._skip = 0
+
+    def handle_starttag(self, tag: str, attrs) -> None:
+        if tag in self._SKIP_TAGS:
+            self._skip += 1
+        if tag in self._BLOCK_TAGS and self._skip == 0:
+            self.parts.append("\n")
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag in self._SKIP_TAGS and self._skip > 0:
+            self._skip -= 1
+
+    def handle_data(self, data: str) -> None:
+        if self._skip == 0:
+            self.parts.append(data)
+
+
+def html_to_text(raw: str, max_chars: int = 8000) -> str:
+    """Convert HTML to condensed plain text (for LLM context).
+
+    Strips script/style/noscript, block-level tags, HTML entities and collapses
+    whitespace, so a web page becomes readable prose instead of raw markup.
+    """
+    parser = _TextExtractor()
+    try:
+        parser.feed(raw)
+        parser.close()
+    except Exception:  # noqa: BLE001 - best-effort on malformed HTML
+        pass
+    text = html_lib.unescape("".join(parser.parts))
+    text = re.sub(r"[ \t\r\f\v]+", " ", text)
+    text = re.sub(r"\n\s*\n+", "\n", text)
+    text = text.strip()
+    return text[:max_chars]
 
 
 class HttpFetchConnector:
@@ -208,6 +256,12 @@ class HttpFetchConnector:
             return ToolResult.fail(error=f"HTTP error: {exc}", error_code="HTTP_ERROR")
 
         text = body_bytes.decode(response.charset_encoding or "utf-8", errors="replace")
+        # Convert HTML to readable text so the LLM gets useful content instead of
+        # raw <script>/<style> markup (which makes reasoning models loop forever).
+        content_type = (response.headers.get("content-type") or "").lower()
+        if "html" in content_type:
+            text = html_to_text(text)
+        text = text[: self.max_response_bytes] if truncated else text
         latency_ms = int((time.perf_counter() - started) * 1000)
         return ToolResult(
             success=True,
