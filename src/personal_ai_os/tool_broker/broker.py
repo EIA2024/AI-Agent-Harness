@@ -56,12 +56,14 @@ class ToolBroker:
         connectors: dict | None = None,
         event_bus=None,
         approval_engine=None,
+        audit_logger=None,
         max_result_chars: int = 8000,
     ) -> None:
         self._registry = registry
         self._policy = policy_engine
         self._credentials = credential_broker
         self._approval_engine = approval_engine
+        self._audit_logger = audit_logger
         # keyed by namespace / source / name prefix → Connector
         self._connectors: dict[str, Any] = dict(connectors or {})
         self._event_bus = event_bus
@@ -152,6 +154,7 @@ class ToolBroker:
 
         if decision.decision == "deny":
             reason = "; ".join(decision.reasons) or "Denied by policy"
+            await self._audit("tool.denied", tool, context, {"reason": reason})
             return await self._finish_failure(
                 tool, context, started, err_code=ERR_DENIED, message=reason,
                 event=EventTypes.TOOL_DENIED, risk_level=decision.risk_level,
@@ -167,6 +170,10 @@ class ToolBroker:
                     context.approval_id, tool.name, arguments
                 )
                 if not verified:
+                    await self._audit(
+                        "approval.mismatch_blocked", tool, context,
+                        {"approval_id": str(context.approval_id)},
+                    )
                     return await self._finish_failure(
                         tool, context, started, err_code=ERR_DENIED,
                         message=(
@@ -236,6 +243,7 @@ class ToolBroker:
             )
 
         await self._record(tool, context, injected, decision, sanitized)
+        await self._audit("tool.executed", tool, context, {"success": True, "truncated": sanitized.truncated})
         await self._publish(
             EventTypes.TOOL_COMPLETED,
             context,
@@ -359,6 +367,34 @@ class ToolBroker:
             await self._event_bus.publish(event)
         except Exception as exc:  # event publishing must never break execution
             logger.warning("Failed to publish %s event: %s", event_type, exc)
+
+    async def _audit(
+        self,
+        event_type: str,
+        tool: ToolDescriptor,
+        context: ToolExecutionContext,
+        details: dict | None = None,
+    ) -> None:
+        """Write a security-relevant audit record. Fail-soft: never breaks execution."""
+        if self._audit_logger is None:
+            return
+        try:
+            await self._audit_logger.log(
+                owner_id=context.owner_id,
+                actor_type="agent",
+                actor_id=str(context.run_id),
+                event_type=event_type,
+                resource_type="tool",
+                resource_id=tool.name,
+                details={
+                    "tool": tool.name,
+                    "risk_level": tool.risk_level,
+                    "run_id": str(context.run_id),
+                    **(details or {}),
+                },
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Audit log failed for %s: %s", tool.name, exc)
 
     async def _record(
         self,
