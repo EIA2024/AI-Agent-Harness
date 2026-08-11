@@ -10,6 +10,8 @@ from textual.containers import Horizontal, Vertical
 from textual.screen import ModalScreen
 from textual.widgets import Button, Input, Static
 
+from personal_ai_os.cli.sanitize import redact_secrets
+
 
 class ApprovalScreen(ModalScreen[tuple[str, dict[str, Any] | None]]):
     """Shows the pending approval and lets the user decide."""
@@ -38,7 +40,7 @@ class ApprovalScreen(ModalScreen[tuple[str, dict[str, Any] | None]]):
             yield Static(f"[bold red]! Approval required · R{risk}[/]", id="approval-title")
             yield Static(f"Tool: {tool}")
             yield Static(f"Action: {summary or '(none)'}")
-            yield Static(f"Args: {json.dumps(args, ensure_ascii=False)[:400]}")
+            yield Static(f"Args: {json.dumps(redact_secrets(args), ensure_ascii=False)[:400]}")
             yield Static("", id="edit-hint")
             yield Input(placeholder='Edited args (JSON) — used with Edit', id="edit-input")
             with Horizontal(id="approval-actions"):

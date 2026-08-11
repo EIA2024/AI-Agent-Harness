@@ -128,3 +128,40 @@ def config_path() -> None:
     """Print the profiles file location."""
     store = ProviderConfigStore()
     sys.stdout.write(str(store.path) + "\n")
+
+
+@app.command("sources")
+def config_sources() -> None:
+    """Show the source precedence of each effective configuration value (T51)."""
+    import os
+
+    from personal_ai_os.cli.bootstrap import api_key, api_url
+
+    store = ProviderConfigStore()
+    active = store.get_active()
+    url_src = "env PERSONAL_AI_API_URL" if os.environ.get("PERSONAL_AI_API_URL") else "default"
+    key_src = "env PERSONAL_AI_API_KEY" if os.environ.get("PERSONAL_AI_API_KEY") else "default"
+    sys.stdout.write(
+        f"api_url : {api_url()}  < {url_src}\n"
+        f"api_key : {'configured' if api_key() else 'missing'}  < {key_src}\n"
+        f"profile : {active.name if active else '(none)'}  < ProviderConfigStore ({store.path})\n"
+    )
+
+
+@app.command("validate")
+def config_validate() -> None:
+    """Sanity-check all saved profiles (no secrets printed)."""
+    store = ProviderConfigStore()
+    problems: list[str] = []
+    for profile in store.list_profiles():
+        if profile.format not in ("openai", "anthropic"):
+            problems.append(f"{profile.name}: unsupported format {profile.format!r}")
+        if not profile.api_key:
+            problems.append(f"{profile.name}: missing api_key")
+        if not profile.base_url and profile.format == "openai":
+            problems.append(f"{profile.name}: openai profile missing base_url")
+    if problems:
+        for problem in problems:
+            sys.stdout.write(f"error: {problem}\n")
+        raise typer.Exit(code=1)
+    sys.stdout.write("all profiles valid\n")

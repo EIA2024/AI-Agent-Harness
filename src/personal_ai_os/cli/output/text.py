@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 from personal_ai_os.cli.domain.state import AppState
+from personal_ai_os.cli.sanitize import strip_control_sequences
 
 
 def final_answer(state: AppState) -> str:
-    """The assistant's final text for the run."""
-    return state.final_response or state.assistant_text
+    """The assistant's final text for the run (sanitized for the terminal)."""
+    return strip_control_sequences(state.final_response or state.assistant_text)
 
 
 def render_transcript(state: AppState) -> str:
@@ -20,8 +21,8 @@ def render_transcript(state: AppState) -> str:
     lines: list[str] = []
     for cell in state.transcript:
         if cell.kind == "assistant" and not cell.payload.get("streaming"):
-            lines.append(cell.text)
+            lines.append(strip_control_sequences(cell.text))
             continue
         if cell.text:
-            lines.append(f"{cell.kind}: {cell.text}")
+            lines.append(f"{cell.kind}: {strip_control_sequences(cell.text)}")
     return "\n".join(lines)

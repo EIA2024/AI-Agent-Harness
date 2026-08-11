@@ -172,8 +172,10 @@ app.add_typer(config.app, name="config")
 
 
 @app.command("doctor", help="Diagnose CLI / API / provider setup.")
-def _doctor() -> None:
-    doctor_command()
+def _doctor(
+    json_mode: bool = typer.Option(False, "--json", help="Machine-readable JSON output"),
+) -> None:
+    doctor_command(json_mode=json_mode)
 
 
 # ---------------------------------------------------------------------------

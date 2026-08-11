@@ -2,12 +2,14 @@
 
 These produce plain-text lines from the presentation domain so they are
 unit-testable and reusable by the plain/accessible fallback mode. The Textual
-widgets apply semantic styling on top.
+widgets apply semantic styling on top. All untrusted cell text passes through
+the terminal sanitizer (T52).
 """
 
 from __future__ import annotations
 
 from personal_ai_os.cli.domain.state import AppState, TranscriptCell
+from personal_ai_os.cli.sanitize import strip_control_sequences
 
 _STATUS_GLYPHS = {
     "running": "*",
@@ -23,7 +25,7 @@ def status_glyph(run_status: str) -> str:
 
 
 def status_bar_text(state: AppState) -> str:
-    """Single-line status: session · model · run state · connection."""
+    """Single-line status: session · run · state · connection."""
     session = (state.session_id or "-")[:8]
     run = (state.run_id or "-")[:8]
     return (
@@ -33,27 +35,27 @@ def status_bar_text(state: AppState) -> str:
 
 
 def cell_lines(cell: TranscriptCell) -> list[str]:
-    """Plain-text representation of one transcript cell."""
+    """Plain-text representation of one transcript cell (sanitized)."""
     kind = cell.kind
     if kind == "assistant":
-        return cell.text.splitlines() or [""]
+        return [strip_control_sequences(line) for line in cell.text.splitlines()] or [""]
     if kind == "tool":
         status = cell.payload.get("status", "")
         name = cell.payload.get("tool_name", "")
-        return [f"> {name} [{status}]"]
+        return [f"> {strip_control_sequences(name)} [{status}]"]
     if kind == "approval":
         return ["! Approval required"]
     if kind == "run_status":
-        return [cell.text] if cell.text else []
+        return [strip_control_sequences(cell.text)] if cell.text else []
     if kind == "progress":
-        return [f"... {cell.text}"] if cell.text else []
+        return [f"... {strip_control_sequences(cell.text)}"] if cell.text else []
     if kind == "error":
-        return [f"! {cell.text}"]
+        return [f"! {strip_control_sequences(cell.text)}"]
     if kind == "warning":
-        return [f"! {cell.text}"]
+        return [f"! {strip_control_sequences(cell.text)}"]
     if kind == "notice":
-        return [cell.text] if cell.text else []
-    return [cell.text] if cell.text else []
+        return [strip_control_sequences(cell.text)] if cell.text else []
+    return [strip_control_sequences(cell.text)] if cell.text else []
 
 
 def transcript_lines(state: AppState, *, max_cells: int | None = None) -> list[str]:

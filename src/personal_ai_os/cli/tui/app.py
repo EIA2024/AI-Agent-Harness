@@ -16,6 +16,7 @@ from textual.widgets import Footer, Header
 
 from personal_ai_os.cli.api.client import AsyncAPIClient
 from personal_ai_os.cli.bootstrap import build_client
+from personal_ai_os.cli.sanitize import redact_secrets, strip_control_sequences
 from personal_ai_os.cli.tui.command_registry import list_commands, lookup
 from personal_ai_os.cli.tui.controllers.chat import ChatController
 from personal_ai_os.cli.tui.keymap import BINDINGS as KEYMAP_BINDINGS
@@ -118,6 +119,9 @@ class PersonalAIApp(App):
         self.query_one("#composer", Composer).set_disabled(self.controller.busy)
         if self.controller.pending_approval and not self._approval_open:
             self._approval_open = True
+            from personal_ai_os.cli.notify import approval_required
+
+            approval_required()
             self.push_screen(
                 ApprovalScreen(dict(self.controller.pending_approval)),
                 callback=self._on_approval_dismiss,
@@ -204,13 +208,13 @@ class PersonalAIApp(App):
         ]
         if tool is not None:
             lines.append(f"risk   : R{tool.risk_level}" if tool.risk_level else "risk   : R0")
-            lines.append(f"args   : {json.dumps(tool.arguments_preview, ensure_ascii=False)}")
+            lines.append(f"args   : {json.dumps(redact_secrets(tool.arguments_preview), ensure_ascii=False)}")
             if tool.summary:
-                lines.append(f"summary: {tool.summary}")
+                lines.append(f"summary: {strip_control_sequences(tool.summary)}")
             if tool.result_preview:
-                lines.append(f"result : {tool.result_preview}")
+                lines.append(f"result : {strip_control_sequences(tool.result_preview)}")
             if tool.error:
-                lines.append(f"error  : {tool.error}")
+                lines.append(f"error  : {strip_control_sequences(tool.error)}")
         self.push_screen(InfoScreen("Tool detail", lines))
 
     async def action_status(self) -> None:
