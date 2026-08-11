@@ -2,7 +2,7 @@
 
 import pytest
 
-from personal_ai_os.context_engine.budget import ContextBudget, DEFAULT_ALLOCATIONS
+from personal_ai_os.context_engine.budget import DEFAULT_ALLOCATIONS, ContextBudget
 from personal_ai_os.context_engine.engine import ContextEngine
 from tests.unit.fakes import FakeMemoryStore, FakeToolRegistry, make_memory, make_tool
 

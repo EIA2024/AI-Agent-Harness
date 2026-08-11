@@ -15,11 +15,25 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from personal_ai_os.db import session as db_session
-from personal_ai_os.gateway.services import ServiceContainer, build_default_services, complete_wiring
+from personal_ai_os.gateway.services import (
+    ServiceContainer,
+    build_default_services,
+    complete_wiring,
+)
 
 from . import config
 from .deps import ensure_dev_owner
-from .routers import approvals, audit, automations, memories, messages, runs, sessions, stream, tools
+from .routers import (
+    approvals,
+    audit,
+    automations,
+    memories,
+    messages,
+    runs,
+    sessions,
+    stream,
+    tools,
+)
 
 
 async def ensure_database() -> None:

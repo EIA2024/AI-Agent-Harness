@@ -7,17 +7,16 @@ All departments implement against these models and protocols.
 from __future__ import annotations
 
 from datetime import datetime
-from enum import Enum
-from typing import Any, Literal, TypedDict
+from enum import StrEnum
+from typing import Literal, TypedDict
 from uuid import UUID, uuid4
-
 
 # ---------------------------------------------------------------------------
 # Trust labels
 # ---------------------------------------------------------------------------
 
 
-class TrustLevel(str, Enum):
+class TrustLevel(StrEnum):
     TRUSTED_USER = "trusted_user"
     TRUSTED_SYSTEM = "trusted_system"
     TRUSTED_TOOL = "trusted_tool"
@@ -37,7 +36,7 @@ class TrustLevel(str, Enum):
 # ---------------------------------------------------------------------------
 
 
-class ErrorCode(str, Enum):
+class ErrorCode(StrEnum):
     MODEL_ERROR = "MODEL_ERROR"
     TOOL_ERROR = "TOOL_ERROR"
     AUTH_ERROR = "AUTH_ERROR"
@@ -252,11 +251,11 @@ class ToolResult:
         self.raw_size_bytes = raw_size_bytes
 
     @classmethod
-    def ok(cls, *, data: dict | None = None, text: str | None = None, latency_ms: int = 0) -> "ToolResult":
+    def ok(cls, *, data: dict | None = None, text: str | None = None, latency_ms: int = 0) -> ToolResult:
         return cls(success=True, data=data, text=text, latency_ms=latency_ms)
 
     @classmethod
-    def fail(cls, *, error: str, error_code: str = "TOOL_ERROR", latency_ms: int = 0) -> "ToolResult":
+    def fail(cls, *, error: str, error_code: str = "TOOL_ERROR", latency_ms: int = 0) -> ToolResult:
         return cls(success=False, error=error, error_code=error_code, latency_ms=latency_ms)
 
     def to_dict(self) -> dict:

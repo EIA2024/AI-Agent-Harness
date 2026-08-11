@@ -37,7 +37,6 @@ from personal_ai_os.policy_engine import ApprovalEngine, CredentialBroker, Polic
 from personal_ai_os.scheduler import EventBus
 from personal_ai_os.tool_broker import ToolBroker, ToolRegistry
 
-
 # ---------------------------------------------------------------------------
 # Test double: a scripted model that emits tool calls / content in sequence
 # ---------------------------------------------------------------------------

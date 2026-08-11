@@ -312,7 +312,7 @@ class FakeProvider:
         usage = entry.get("usage") or {}
         model = request.preferred_model or "fake-model"
         input_tokens = int(usage.get("input_tokens", 0)) or max(1, len(request.messages) * 10)
-        output_tokens = int(usage.get("output_tokens", 0)) or (len((entry.get("content") or "")) // 4 or 1)
+        output_tokens = int(usage.get("output_tokens", 0)) or (len(entry.get("content") or "") // 4 or 1)
         cached_tokens = int(usage.get("cached_tokens", 0))
         return ModelResponse(
             content=entry.get("content"),

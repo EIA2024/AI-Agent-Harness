@@ -18,12 +18,13 @@ database.
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.types import Command
-from sqlalchemy import select, update as sa_update
+from sqlalchemy import select
+from sqlalchemy import update as sa_update
 
 from personal_ai_os.common.models import (
     AgentOSError,
@@ -38,7 +39,7 @@ _MAX_TOOL_RESULTS_PERSISTED = 50
 
 
 def _now() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 def _coerce_uuid(value: Any) -> uuid.UUID:

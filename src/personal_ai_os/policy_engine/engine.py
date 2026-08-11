@@ -23,8 +23,8 @@ If no rule matches, the engine falls back to the default policy for the tool's
 from __future__ import annotations
 
 import fnmatch
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Callable
 
 from ..common.models import PolicyDecision, ToolDescriptor, ToolExecutionContext
 

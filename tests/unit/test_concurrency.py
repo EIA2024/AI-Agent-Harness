@@ -82,12 +82,20 @@ async def test_concurrent_runs_do_not_cross_contaminate(tmp_path):
     runner, model = await _make_runner()
 
     async with session_scope() as s:
-        u1 = User(username=f"c1{uuid.uuid4().hex[:8]}", api_key="k1"); s.add(u1); await s.flush()
-        u2 = User(username=f"c2{uuid.uuid4().hex[:8]}", api_key="k2"); s.add(u2); await s.flush()
+        u1 = User(username=f"c1{uuid.uuid4().hex[:8]}", api_key="k1")
+        s.add(u1)
+        await s.flush()
+        u2 = User(username=f"c2{uuid.uuid4().hex[:8]}", api_key="k2")
+        s.add(u2)
+        await s.flush()
         oid1, oid2 = u1.id, u2.id
         from personal_ai_os.db.models import Session
-        s1 = Session(owner_id=oid1, channel="api", status="active"); s.add(s1); await s.flush()
-        s2 = Session(owner_id=oid2, channel="api", status="active"); s.add(s2); await s.flush()
+        s1 = Session(owner_id=oid1, channel="api", status="active")
+        s.add(s1)
+        await s.flush()
+        s2 = Session(owner_id=oid2, channel="api", status="active")
+        s.add(s2)
+        await s.flush()
         sid1, sid2 = s1.id, s2.id
 
     async def run_one(owner_id, session_id, text):

@@ -4,6 +4,7 @@ Runtime & Context stack composes correctly.
 """
 
 from langgraph.checkpoint.memory import InMemorySaver
+from sqlalchemy import select
 
 from personal_ai_os.agent_runtime.classifier import TaskClassifier
 from personal_ai_os.agent_runtime.graph import build_graph
@@ -14,7 +15,6 @@ from personal_ai_os.context_engine.budget import ContextBudget
 from personal_ai_os.context_engine.engine import ContextEngine
 from personal_ai_os.db import session as db_session
 from personal_ai_os.db.models import Run
-from sqlalchemy import select
 from tests.unit.fakes import (
     FakeMemoryStore,
     FakeModelProvider,

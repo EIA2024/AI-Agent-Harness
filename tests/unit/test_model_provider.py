@@ -230,7 +230,10 @@ async def test_router_no_providers_raises():
 
 
 async def test_anthropic_message_conversion_helpers():
-    from personal_ai_os.model_gateway.provider import split_system_and_messages, to_anthropic_messages
+    from personal_ai_os.model_gateway.provider import (
+        split_system_and_messages,
+        to_anthropic_messages,
+    )
 
     system, rest = split_system_and_messages(
         [

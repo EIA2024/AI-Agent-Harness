@@ -1,5 +1,6 @@
 """EventBus tests: subscribe/publish, concurrency, and handler-failure isolation."""
 
+import asyncio
 import uuid
 
 from personal_ai_os.common.models import DomainEvent, EventTypes

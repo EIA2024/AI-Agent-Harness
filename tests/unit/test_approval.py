@@ -35,7 +35,7 @@ def make_request(user_run):
 
 
 @pytest.fixture
-def owner_id(user_run) -> "object":
+def owner_id(user_run) -> object:
     """A real user id (users table has FK on approved_by)."""
     return user_run[0]
 

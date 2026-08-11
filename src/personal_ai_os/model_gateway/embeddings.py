@@ -50,7 +50,7 @@ class DeterministicEmbedding:
     def _vector(self, text: str) -> list[float]:
         vec = [0.0] * self.dim
         for pos, tok in enumerate(tokenize(text)):
-            digest = hashlib.blake2b(f"{pos}:{tok}".encode("utf-8"), digest_size=8).digest()
+            digest = hashlib.blake2b(f"{pos}:{tok}".encode(), digest_size=8).digest()
             idx = int.from_bytes(digest[:4], "big") % self.dim
             weight = (int.from_bytes(digest[4:8], "big") / 2**32) * 2.0 - 1.0
             vec[idx] += weight

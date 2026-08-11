@@ -16,9 +16,10 @@ extended without touching code.
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 
 @dataclass
@@ -132,8 +133,9 @@ class EvalRunner:
                 # Not registered → not executable → effectively blocked.
                 blocked.add(tool_name)
                 continue
-            from personal_ai_os.common.models import ToolExecutionContext
             from uuid import uuid4
+
+            from personal_ai_os.common.models import ToolExecutionContext
 
             decision = await self.policy_engine.evaluate(
                 tool, {"query": case.query}, ToolExecutionContext(run_id=uuid4(), owner_id=uuid4())
