@@ -93,3 +93,10 @@ def test_replay_tool_completed():
     tool_done = next(e for e in events if e.type == UIEventType.TOOL_COMPLETED)
     assert tool_done.payload["tool_name"] == "filesystem.read"
     assert tool_done.payload["latency_ms"] == 420
+
+
+def test_server_error_event_maps_to_error():
+    """F1.2 — the server streams `error` (HTTP 200) for unknown runs."""
+    events = _events('event: error\ndata: {"detail": "Run not found"}\n\n')
+    assert events[0].type == UIEventType.ERROR
+    assert events[0].payload["message"] == "Run not found"

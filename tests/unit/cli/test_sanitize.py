@@ -6,7 +6,9 @@ from personal_ai_os.cli.output.jsonl import JSONLWriter
 from personal_ai_os.cli.sanitize import (
     is_secret_key,
     redact_secrets,
+    sanitize_text,
     strip_control_sequences,
+    truncate_long_lines,
 )
 from personal_ai_os.cli.tui.render import transcript_lines
 
@@ -109,3 +111,47 @@ def test_tui_render_sanitizes_malicious_tool_name():
     joined = "\n".join(lines)
     assert "\x1b" not in joined
     assert "evil" in joined
+
+
+def test_bidi_override_characters_stripped():
+    assert strip_control_sequences("abc\u202eefg") == "abcefg"
+
+
+def test_truncate_long_lines_breaks_unbroken_runs():
+    long = "x" * 30_000
+    truncated = truncate_long_lines(long, max_line=500)
+    assert len(truncated.replace("\n", "")) == 30_000  # content preserved, just wrapped
+    assert "\n" in truncated
+
+
+def test_sanitize_text_applies_both():
+    payload = "\x1b[31m" + ("y" * 15_000)
+    cleaned = sanitize_text(payload)
+    assert "\x1b" not in cleaned
+
+
+def test_redact_secrets_recurses_lists():
+    args = {"headers": [{"Authorization": "Bearer sk-xyz", "Host": "x.com"}]}
+    redacted = redact_secrets(args)
+    assert redacted["headers"][0]["Authorization"] == "***"
+    assert redacted["headers"][0]["Host"] == "x.com"
+
+
+def test_secret_key_matches_more_variants():
+    for key in ("access_token", "client_secret", "passphrase", "session_id", "bearer"):
+        assert is_secret_key(key), key
+
+
+def test_rich_table_output_is_sanitized(capsys):
+    import sys
+
+    from personal_ai_os.cli.commands.table_output import emit
+
+    emit(
+        [{"name": "evil\x1b]0;HACK\x07tool", "desc": "desc"}],
+        columns=[("NAME", "name"), ("DESC", "desc")],
+        stdout=sys.stdout,
+    )
+    captured = capsys.readouterr().out
+    assert "\x1b" not in captured
+    assert "evil" in captured

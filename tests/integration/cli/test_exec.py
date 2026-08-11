@@ -138,3 +138,56 @@ async def test_exec_unsupported_format_usage_error(cli_client):
             client, prompt="hi", output_format="yaml", stdout=out, stderr=err
         )
     assert code == ExitCode.USAGE_OR_CONFIG
+
+
+class _EofClient(AsyncAPIClient):
+    """A client whose stream ends without a terminal event (connection drop)."""
+
+    def __init__(self) -> None:
+        super().__init__(base_url="http://test", api_key="k")
+        self.created = True
+
+    async def create_session(self, channel="cli", **extra):
+        return _Session("s1")
+
+    async def send_message(self, session_id, text):
+        return _Send("r1")
+
+    async def stream_run(self, run_id):
+        for ev in _yield_raw("run.started", '{"run_id": "r1"}') + _yield_raw(
+            "text.delta", '{"text": "partial"}'
+        ):
+            yield ev
+        # no terminal event — clean EOF
+
+
+class _Session:
+    def __init__(self, sid):
+        self.id = sid
+
+
+class _Send:
+    def __init__(self, run_id):
+        self.run_id = run_id
+        self.status = "running"
+        self.message_id = "m1"
+
+
+def _yield_raw(event: str, data: str):
+    import json
+    from types import SimpleNamespace
+
+    return [SimpleNamespace(event=event, data=json.loads(data), malformed=False,
+                            raw_data=data, id=None, retry=None)]
+
+
+@pytest.mark.asyncio
+async def test_exec_stream_eof_without_terminal_is_error():
+    """F1.1 — a dropped stream must not exit 0 with an empty answer."""
+    from personal_ai_os.cli.commands.exec import run_exec as _run_exec
+
+    client = _EofClient()
+    out, err = io.StringIO(), io.StringIO()
+    code = await _run_exec(client, prompt="hi", output_format="text", stdout=out, stderr=err)
+    assert code == ExitCode.PROTOCOL_OR_SCHEMA
+    assert "stream ended" in err.getvalue()

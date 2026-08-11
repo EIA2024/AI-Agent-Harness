@@ -23,28 +23,33 @@ from personal_ai_os.cli.output.exit_code import ExitCode, exit_code_for_run_stat
 from personal_ai_os.cli.output.json_output import run_summary
 from personal_ai_os.cli.output.jsonl import JSONLWriter
 from personal_ai_os.cli.output.text import final_answer
+from personal_ai_os.cli.sanitize import strip_control_sequences
 
 StderrWriter = Callable[[str], None]
 
 
 def _progress(stderr: StderrWriter, event: UIEvent, state: AppState) -> None:
-    """Human progress lines for headless mode — stderr only, never stdout."""
+    """Human progress lines for headless mode — stderr only, never stdout.
+
+    Tool names / errors originate from model- or remote-controlled data, so they
+    are sanitized (T52) before touching stderr.
+    """
     kind = event.type
     payload = dict(event.payload or {})
     if kind.value.startswith("tool."):
-        name = payload.get("tool_name", "")
+        name = strip_control_sequences(payload.get("tool_name", ""))
         if kind.value == "tool.requested":
             stderr(f"tool  {name} requested\n")
         elif kind.value == "tool.completed":
             stderr(f"tool  {name} done\n")
         elif kind.value == "tool.failed":
-            stderr(f"tool  {name} failed: {payload.get('error', '')}\n")
+            stderr(f"tool  {name} failed: {strip_control_sequences(payload.get('error', ''))}\n")
     elif kind.value == "approval.required":
         stderr("approval required\n")
     elif kind.value == "run.completed":
         stderr("run completed\n")
     elif kind.value == "run.failed":
-        stderr(f"run failed: {state.last_error or ''}\n")
+        stderr(f"run failed: {strip_control_sequences(state.last_error or '')}\n")
     elif kind.value == "run.cancelled":
         stderr("run cancelled\n")
 
@@ -118,6 +123,13 @@ async def _run_exec_impl(
             writer.emit(event, state)
         else:
             _progress(stderr.write, event, state)
+
+    # F1.1: the stream ended without a terminal event (connection dropped, or
+    # the server replayed a still-running run). Report failure — never exit 0
+    # with an empty answer, which would mask data loss as success.
+    if state.run_status == "running":
+        stderr.write("stream ended before the run completed\n")
+        return ExitCode.PROTOCOL_OR_SCHEMA
 
     # Fallback: a completed stream may omit the answer text (tool-only path);
     # fetch the run record for the final response.

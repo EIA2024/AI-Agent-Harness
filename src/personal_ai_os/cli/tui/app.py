@@ -8,6 +8,7 @@ and approval resolution.
 
 from __future__ import annotations
 
+import asyncio
 import json
 
 from textual.app import App, ComposeResult
@@ -104,6 +105,16 @@ class PersonalAIApp(App):
         self.query_one("#composer", Composer).focus()
 
     async def on_unmount(self) -> None:
+        # Cancel any in-flight stream task so its finally block never refreshes
+        # a torn-down DOM (F6.1).
+        if self.controller is not None and self.controller._stream_task is not None:
+            task = self.controller._stream_task
+            if not task.done():
+                task.cancel()
+                try:
+                    await task
+                except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                    pass
         if self._owns_client and self._client is not None:
             await self._client.aclose()
 
@@ -129,7 +140,12 @@ class PersonalAIApp(App):
 
     async def _on_approval_dismiss(self, result) -> None:  # noqa: ANN001
         self._approval_open = False
-        if result is None or self.controller is None:
+        if self.controller is None:
+            return
+        if result is None:
+            # Escape = dismiss the card in the UI (the run stays waiting on the
+            # server; the user can re-open via /approvals or a new flow).
+            self.controller.pending_approval = None
             return
         action, edited = result
         if action == "cancel":
@@ -241,7 +257,7 @@ class PersonalAIApp(App):
         if state.pending_approval:
             lines.append(f"Approval  : pending ({state.pending_approval.get('tool_name', '?')})")
         if state.last_error:
-            lines.append(f"Last error: {state.last_error}")
+            lines.append(f"Last error: {strip_control_sequences(state.last_error)}")
         self.push_screen(InfoScreen("Status", lines))
 
     async def cmd_memory(self, args: str) -> None:
@@ -256,7 +272,7 @@ class PersonalAIApp(App):
         except Exception as exc:  # noqa: BLE001
             self.notify(f"memory error: {exc}", timeout=3)
             return
-        lines = [f"[dim]{m.id[:8]} · {m.type} · {m.scope}[/] {m.content[:80]}" for m in memories]
+        lines = [f"[dim]{m.id[:8]} · {m.type} · {m.scope}[/] {strip_control_sequences(m.content[:120])}" for m in memories]
         if not lines:
             lines = ["no memories"]
         self.push_screen(InfoScreen(f"Memory ({len(memories)})", lines))
@@ -269,7 +285,7 @@ class PersonalAIApp(App):
         except Exception as exc:  # noqa: BLE001
             self.notify(f"tools error: {exc}", timeout=3)
             return
-        lines = [f"R{t.risk_level}  {t.name}  [dim]{t.description[:50]}[/]" for t in tools]
+        lines = [f"R{t.risk_level}  {strip_control_sequences(t.name)}  [dim]{strip_control_sequences(t.description[:60])}[/]" for t in tools]
         self.push_screen(InfoScreen(f"Tools ({len(tools)})", lines))
 
     async def cmd_approvals(self, _args: str) -> None:
@@ -281,7 +297,7 @@ class PersonalAIApp(App):
             self.notify(f"approvals error: {exc}", timeout=3)
             return
         lines = [
-            f"[dim]{a.id[:8]}[/] R{a.risk_level}  {a.tool_name}  {a.action_summary}" for a in approvals
+            f"[dim]{a.id[:8]}[/] R{a.risk_level}  {strip_control_sequences(a.tool_name)}  {strip_control_sequences(a.action_summary)}" for a in approvals
         ]
         self.push_screen(InfoScreen(f"Approvals ({len(approvals)})", lines))
 

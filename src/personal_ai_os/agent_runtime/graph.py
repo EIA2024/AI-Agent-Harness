@@ -507,7 +507,11 @@ async def approval(state: AgentState, deps: _Deps) -> dict:
     owner_uuid = UUID(str(state.get("owner_id") or uuid.uuid4()))
     session_uuid = UUID(str(state["session_id"])) if state.get("session_id") else None
 
-    if not (isinstance(decision, dict) and decision.get("decision") == "approved"):
+    approved_decision = isinstance(decision, dict) and decision.get("decision") in (
+        "approved",
+        "approved_with_edits",
+    )
+    if not approved_decision:
         rejected = _serialize_rejection(
             name or str(pending_approval.get("tool_name") or ""),
             pending,

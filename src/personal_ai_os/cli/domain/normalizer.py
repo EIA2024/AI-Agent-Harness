@@ -182,6 +182,15 @@ class Normalizer:
     def _on_run_cancelled(self, payload, *, run_id, ts, seq) -> UIEvent:
         return ui_event(UIEventType.RUN_CANCELLED, payload, run_id=run_id, ts=ts, seq=seq)
 
+    def _on_error(self, payload, *, run_id, ts, seq) -> UIEvent:
+        # The server streams an `error` event (HTTP 200) for e.g. unknown runs.
+        # Surface it as a real error, never a silent drop.
+        return ui_event(
+            UIEventType.ERROR,
+            {"message": payload.get("detail", payload.get("message", "server error"))},
+            run_id=run_id, ts=ts, seq=seq,
+        )
+
 
 def _coerce_run_id(payload: Mapping[str, Any]) -> str | None:
     for key in ("run_id", "run", "id"):

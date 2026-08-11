@@ -59,6 +59,17 @@ async def _resolve(
     row state.
     """
     engine = services.approval_engine
+
+    # Double-resolve guard FIRST: a second approve/reject on an already-resolved
+    # approval is a 409. (Must be checked before the engine runs, because the
+    # real engine flips the row status in its own transaction.)
+    async with session_scope() as s:
+        current = await s.get(Approval, approval.id)
+        if current is None:
+            raise HTTPException(status_code=404, detail="Approval not found")
+        if current.status != "pending":
+            raise HTTPException(status_code=409, detail=f"Approval already '{current.status}'")
+
     if engine is not None:
         try:
             await engine.resolve(
@@ -74,18 +85,19 @@ async def _resolve(
             # are best-effort.
             pass
 
+    # Read back the final state: the real engine already set it; a fake engine
+    # (or engine-less test wiring) leaves it pending for us to set directly.
     async with session_scope() as s:
         current = await s.get(Approval, approval.id)
         if current is None:
             raise HTTPException(status_code=404, detail="Approval not found")
-        if current.status != "pending":
-            raise HTTPException(status_code=409, detail=f"Approval already '{current.status}'")
-        current.status = "approved" if decision in ("approved", "approved_with_edits") else "rejected"
-        current.approved_by = user.id
-        if edited_arguments is not None:
-            current.arguments_preview = edited_arguments
-        await s.flush()
-        await s.refresh(current)
+        if current.status == "pending":
+            current.status = "approved" if decision in ("approved", "approved_with_edits") else "rejected"
+            current.approved_by = user.id
+            if edited_arguments is not None:
+                current.arguments_preview = edited_arguments
+            await s.flush()
+            await s.refresh(current)
         return approval_to_dict(current)
 
 

@@ -394,9 +394,16 @@ class RunRunner:
         approved_by = run_row.owner_id
 
         if self.approval_engine is not None and approval_id is not None:
-            await self.approval_engine.resolve(
-                approval_id, decision=decision, approved_by=approved_by, edited_arguments=edited_arguments
-            )
+            try:
+                await self.approval_engine.resolve(
+                    approval_id, decision=decision, approved_by=approved_by, edited_arguments=edited_arguments
+                )
+            except Exception:
+                # The approval may already have been resolved (e.g. the CLI
+                # posted the decision via /v1/approvals/*/approve first, or a
+                # concurrent resume won). Resume must not 500 on that — the
+                # graph continues from the recorded decision below.
+                pass
         elif approval_id is not None:
             async with session_scope() as session:
                 approval = await session.get(Approval, _coerce_uuid(approval_id))
@@ -466,6 +473,18 @@ class RunRunner:
                     payload={"reason": "cancelled_by_user"},
                 )
             )
+        # M3 fix: terminate a live SSE subscriber immediately (the CLI's Ctrl+C
+        # cancels and then waits for the stream to close) and stop the graph.
+        from personal_ai_os.agent_runtime import streams
+
+        push_live(
+            run_uuid, "run.cancelled",
+            {"run_id": str(run_uuid), "status": "cancelled"},
+        )
+        task = self._bg_tasks.pop(str(run_uuid), None)
+        if task is not None and not task.done():
+            task.cancel()
+        streams.unregister(run_uuid)
 
     async def get_run(self, run_id) -> dict:
         """Read a Run record from the DB as a plain dict."""

@@ -15,6 +15,7 @@ commands available as compatibility aliases.
 from __future__ import annotations
 
 import asyncio
+import json
 import sys
 
 import typer
@@ -217,16 +218,32 @@ def approve_legacy(
         "Warning: `personal-ai approve` is deprecated; use `personal-ai approvals`.", err=True
     )
     if list_:
-        from personal_ai_os.cli.commands.approvals import approvals_list
+        import asyncio
 
-        approvals_list()
+        from personal_ai_os.cli.commands.approvals import _list_approvals
+
+        # Call the underlying async function with explicit args — invoking the
+        # Typer command directly would pass OptionInfo objects as values.
+        asyncio.run(
+            _list_approvals(
+                status="pending", json_mode=False, stdout=sys.stdout, stderr=sys.stderr
+            )
+        )
         return
     if not approval_id:
         typer.echo("Provide an approval id or use --list.", err=True)
         raise typer.Exit(code=2)
-    from personal_ai_os.cli.commands.approvals import approvals_approve
+    # Legacy `approve <id>` prints the full JSON response (scripts may parse it).
 
-    approvals_approve(approval_id)
+    from personal_ai_os.cli.bootstrap import build_client
+    from personal_ai_os.cli.commands.run_helper import run_admin
+
+    async def _do_approve() -> None:
+        async with build_client() as client:
+            result = await client.approve(approval_id)
+        sys.stdout.write(json.dumps(result.__dict__, ensure_ascii=False) + "\n")
+
+    run_admin(_do_approve)
 
 
 def _ensure_utf8() -> None:

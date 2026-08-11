@@ -72,7 +72,12 @@ class AsyncAPIClient:
             raise errors.classify(response.status_code, detail)
         if response.status_code == 204 or not response.content:
             return None
-        return response.json()
+        try:
+            return response.json()
+        except json.JSONDecodeError:
+            raise errors.StreamProtocolError(
+                f"server returned a non-JSON response ({response.status_code})"
+            ) from None
 
     # -- sessions ----------------------------------------------------------
 

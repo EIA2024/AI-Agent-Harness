@@ -107,6 +107,7 @@ def reduce(state: AppState, event: UIEvent) -> AppState:
         state.final_response = state.assistant_buffer or state.final_response
         _flush_streaming_assistant(state)
         state.connection_state = ConnectionState.CLOSED
+        state.pending_approval = None  # F2.1: never show a stale approval card
         _add(state, CELL_RUN_STATUS, now, {"status": "completed"}, "Run completed")
         return state
 
@@ -118,12 +119,14 @@ def reduce(state: AppState, event: UIEvent) -> AppState:
             or (payload.get("status") or "failed")
         )
         state.connection_state = ConnectionState.CLOSED
+        state.pending_approval = None
         _add(state, CELL_RUN_STATUS, now, {"status": "failed"}, f"Run failed: {state.last_error}")
         return state
 
     if kind == UIEventType.RUN_CANCELLED:
         state.run_status = "cancelled"
         state.connection_state = ConnectionState.CLOSED
+        state.pending_approval = None
         _add(state, CELL_RUN_STATUS, now, {"status": "cancelled"}, "Run cancelled")
         return state
 
@@ -175,13 +178,17 @@ def _upsert_tool(state: AppState, event: UIEvent, now: datetime) -> ToolViewStat
             tool.arguments_preview = dict(
                 payload.get("arguments_preview") or payload.get("arguments") or {}
             )
-        _add(
-            state,
-            CELL_TOOL,
-            now,
-            {"tool_call_id": tool_id, "tool_name": tool.name, "status": tool.status},
-            f"{tool.name} requested",
-        )
+        # F3.3: a replay after resume re-sends tool.requested for a tool we
+        # already surfaced — don't append a duplicate card.
+        last = state.last_cell
+        if not (last is not None and last.kind == CELL_TOOL and last.payload.get("tool_call_id") == tool_id):
+            _add(
+                state,
+                CELL_TOOL,
+                now,
+                {"tool_call_id": tool_id, "tool_name": tool.name, "status": tool.status},
+                f"{tool.name} requested",
+            )
     return tool
 
 

@@ -141,10 +141,13 @@ class ChatController:
                 await self.client.reject(approval_id)
             elif action == "edit" and edited_arguments is not None:
                 await self.client.edit_approval(approval_id, edited_arguments)
-            self.pending_approval = None
             run_id = self.state.run_id
             if run_id:
                 await self.client.resume_run(run_id, approval_id=approval_id, decision=decision)
+            # Only forget the pending approval after the resume succeeded; on a
+            # 409 (concurrent resume) we keep it so the modal can be retried.
+            self.pending_approval = None
+            if run_id:
                 self._stream_task = asyncio.create_task(self._stream(run_id))
         except (APIError, TransportError) as exc:
             self.state.last_error = str(exc)
@@ -160,6 +163,7 @@ class ChatController:
         except (APIError, TransportError) as exc:
             self.state.last_error = str(exc)
         finally:
+            self.pending_approval = None  # F3.4: don't re-pop the modal on cancel
             self._refresh(force=True)
 
     def _append_user(self, prompt: str) -> None:
