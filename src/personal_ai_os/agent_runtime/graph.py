@@ -52,6 +52,10 @@ from personal_ai_os.common.utils import idempotency_key
 
 logger = logging.getLogger(__name__)
 
+#: Unbounded-autonomous-loop guard — maximum tool calls a single run may make
+#: before the graph forces the model to conclude (blueprint §19, threat #12).
+MAX_TOOL_CALLS = 5
+
 
 class RuntimeState(AgentState, total=False):
     """Graph-internal channels on top of the public AgentState contract."""
@@ -310,13 +314,35 @@ async def decide(state: AgentState, deps: _Deps) -> dict:
     else:
         built = await deps.context_engine.build(state)
     tools = await _available_tool_schemas(deps.tool_broker, state)
+
+    # Unbounded-autonomous-loop guard (blueprint §19): once the run has made
+    # MAX_TOOL_CALLS tool calls, stop offering tools and force the model to
+    # conclude from what it has, rather than looping forever.
+    if len(state.get("tool_results") or []) >= MAX_TOOL_CALLS:
+        tools = None
+        messages = list(built["messages"]) + [
+            {
+                "role": "system",
+                "content": (
+                    "工具调用已达上限，不能再调用任何工具。"
+                    "请基于已有信息直接回答用户；如果信息不足，如实说明并给出下一步建议。"
+                ),
+            }
+        ]
+    else:
+        messages = built["messages"]
+
     request = ModelRequest(
         purpose="assistant",
-        messages=built["messages"],
+        messages=messages,
         tools=tools or None,
     )
     response = await _model_call(deps, state, request)
     usage = _merge_usage(state.get("model_usage"), response.usage)
+
+    # If the loop is exhausted, ignore any (stale) tool call and respond instead.
+    if len(state.get("tool_results") or []) >= MAX_TOOL_CALLS:
+        response.tool_calls = None
 
     tool_calls = response.tool_calls
     if tool_calls:
