@@ -104,6 +104,22 @@ class AsyncAPIClient:
         data = await self.request("GET", f"/v1/runs/{run_id}")
         return RunDTO.from_dict(data)
 
+    async def list_runs(
+        self,
+        *,
+        session_id: str | None = None,
+        status: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> list[RunDTO]:
+        params: dict[str, Any] = {"limit": limit, "offset": offset}
+        if session_id:
+            params["session_id"] = session_id
+        if status:
+            params["status"] = status
+        data = await self.request("GET", "/v1/runs", params=params)
+        return [RunDTO.from_dict(r) for r in (data or [])]
+
     async def cancel_run(self, run_id: str) -> RunDTO:
         data = await self.request("POST", f"/v1/runs/{run_id}/cancel")
         return RunDTO.from_dict(data)

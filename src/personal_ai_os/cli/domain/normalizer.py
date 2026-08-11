@@ -169,11 +169,9 @@ class Normalizer:
         )
 
     def _on_approval_required(self, payload, *, run_id, ts, seq) -> UIEvent:
-        return ui_event(
-            UIEventType.APPROVAL_REQUIRED,
-            {"status": payload.get("status", "waiting_approval")},
-            run_id=run_id, ts=ts, seq=seq,
-        )
+        # T43: pass through enriched fields (approval_id/tool_name/risk_level/…)
+        # when the server includes them; older servers only send status.
+        return ui_event(UIEventType.APPROVAL_REQUIRED, payload, run_id=run_id, ts=ts, seq=seq)
 
     def _on_run_completed(self, payload, *, run_id, ts, seq) -> UIEvent:
         return ui_event(UIEventType.RUN_COMPLETED, payload, run_id=run_id, ts=ts, seq=seq)

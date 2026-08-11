@@ -76,13 +76,33 @@ class FakeMailConnector:
                 risk_level=3,
                 side_effect=True,
                 external_write=True,
-            )
+            ),
+            ToolDescriptor(
+                name="calculator.evaluate",
+                namespace="calculator",
+                description="Evaluate an arithmetic expression (R0 auto)",
+                input_schema={
+                    "type": "object",
+                    "properties": {"expression": {"type": "string"}},
+                    "required": ["expression"],
+                },
+                risk_level=0,
+            ),
         ]
 
     async def execute(
         self, tool: str, arguments: dict, ctx: ToolExecutionContext
     ) -> ToolResult:
-        return ToolResult.ok(data={"sent": True, "to": arguments.get("to")})
+        if tool == "mail.send":
+            return ToolResult.ok(data={"sent": True, "to": arguments.get("to")})
+        if tool == "calculator.evaluate":
+            expr = arguments.get("expression", "")
+            try:
+                value = eval(expr, {"__builtins__": {}})  # noqa: S307 - test double only
+                return ToolResult.ok(data={"result": value})
+            except Exception as exc:  # noqa: BLE001
+                return ToolResult.fail(error=str(exc))
+        return ToolResult.fail(error=f"unknown tool {tool}")
 
 
 def _tool_call(name: str, arguments: dict) -> list[dict]:

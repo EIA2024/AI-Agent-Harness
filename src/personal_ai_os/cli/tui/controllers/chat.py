@@ -87,7 +87,22 @@ class ChatController:
             self._refresh(force=True)
 
     async def _load_pending_approval(self) -> None:
-        """Fetch the pending approval record for the current run (T43-free)."""
+        """Populate the pending-approval card.
+
+        Prefers the T43-enriched event payload (approval_id/tool_name/…); older
+        servers only signal ``status``, so fall back to a pending-list fetch.
+        """
+        event_payload = dict(self.state.pending_approval or {})
+        if event_payload.get("approval_id"):
+            self.pending_approval = {
+                "id": event_payload["approval_id"],
+                "run_id": self.state.run_id,
+                "tool_name": event_payload.get("tool_name", ""),
+                "action_summary": event_payload.get("action_summary", ""),
+                "risk_level": event_payload.get("risk_level", 0),
+                "status": "pending",
+            }
+            return
         try:
             approvals = await self.client.list_approvals(status="pending")
         except (APIError, TransportError):

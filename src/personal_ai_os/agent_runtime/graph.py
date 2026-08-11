@@ -50,6 +50,20 @@ from personal_ai_os.common.models import (
 )
 from personal_ai_os.common.utils import idempotency_key
 
+
+def _push_tool_event(run_id: str, event: str, payload: dict) -> None:
+    """Forward a tool lifecycle event to the run's live SSE if subscribed (T42)."""
+    from personal_ai_os.agent_runtime import streams
+
+    if run_id and streams.get(run_id) is not None:
+        push_live(run_id, event, payload)
+
+
+def _tool_call_id(pending) -> str | None:  # noqa: ANN001
+    if isinstance(pending, dict):
+        return pending.get("id") or pending.get("tool_call_id")
+    return None
+
 logger = logging.getLogger(__name__)
 
 #: Unbounded-autonomous-loop guard — maximum tool calls a single run may make
@@ -411,6 +425,12 @@ async def tool_request(state: AgentState, deps: _Deps) -> dict:
     )
     existing = list(state.get("tool_results") or [])
 
+    run_key = str(run_uuid)
+    tool_call_id = _tool_call_id(pending)
+    _push_tool_event(
+        run_key, "tool.started",
+        {"tool_call_id": tool_call_id, "tool_name": name},
+    )
     try:
         result = await deps.tool_broker.execute(name, arguments, ctx)
     except ApprovalRequiredError as exc:
@@ -423,6 +443,29 @@ async def tool_request(state: AgentState, deps: _Deps) -> dict:
                 "reason": exc.reason,
             },
         }
+
+    if result.success:
+        _push_tool_event(
+            run_key, "tool.completed",
+            {
+                "tool_call_id": tool_call_id,
+                "tool_name": name,
+                "success": True,
+                "latency_ms": getattr(result, "latency_ms", None),
+                "summary": result.text or "",
+            },
+        )
+    else:
+        _push_tool_event(
+            run_key, "tool.failed",
+            {
+                "tool_call_id": tool_call_id,
+                "tool_name": name,
+                "success": False,
+                "latency_ms": getattr(result, "latency_ms", None),
+                "error": result.error_code or result.error or "tool_failed",
+            },
+        )
 
     # Resolve the tool's declared result trust level so the context engine
     # can wrap untrusted content (e.g. web fetches) in DATA markers.
@@ -500,6 +543,30 @@ async def approval(state: AgentState, deps: _Deps) -> dict:
         approval_id=UUID(approval_id) if approval_id else None,
     )
     result = await deps.tool_broker.execute(name, arguments, ctx)
+    run_key = str(run_uuid)
+    tool_call_id = _tool_call_id(pending)
+    if result.success:
+        _push_tool_event(
+            run_key, "tool.completed",
+            {
+                "tool_call_id": tool_call_id,
+                "tool_name": name,
+                "success": True,
+                "latency_ms": getattr(result, "latency_ms", None),
+                "summary": result.text or "",
+            },
+        )
+    else:
+        _push_tool_event(
+            run_key, "tool.failed",
+            {
+                "tool_call_id": tool_call_id,
+                "tool_name": name,
+                "success": False,
+                "latency_ms": getattr(result, "latency_ms", None),
+                "error": result.error_code or result.error or "tool_failed",
+            },
+        )
     tool = deps.tool_broker._registry.get(name) if hasattr(deps.tool_broker, "_registry") else None
     tool_trust = getattr(tool, "result_trust", None) if tool is not None else None
     return {

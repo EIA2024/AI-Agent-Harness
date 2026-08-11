@@ -18,6 +18,28 @@ from ..serializers import run_to_dict
 router = APIRouter(prefix="/v1/runs", tags=["runs"])
 
 
+@router.get("")
+async def list_runs(
+    session_id: UUID | None = None,
+    status: str | None = None,
+    limit: int = 50,
+    offset: int = 0,
+    user=Depends(resolve_user),
+) -> list[dict]:
+    """Owner-scoped run listing with optional filters and pagination."""
+    limit = max(1, min(limit, 200))
+    offset = max(0, offset)
+    query = select(Run).where(Run.owner_id == user.id)
+    if session_id is not None:
+        query = query.where(Run.session_id == session_id)
+    if status is not None:
+        query = query.where(Run.status == status)
+    query = query.order_by(Run.created_at.desc()).limit(limit).offset(offset)
+    async with session_scope() as s:
+        runs = (await s.execute(query)).scalars().all()
+        return [run_to_dict(r) for r in runs]
+
+
 @router.get("/{run_id}")
 async def get_run(run_id: UUID, user=Depends(resolve_user)) -> dict:
     """Run status + state + steps + tool-call summary."""

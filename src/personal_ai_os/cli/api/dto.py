@@ -27,6 +27,8 @@ class SessionDTO:
     agent_id: str | None = None
     created_at: str | None = None
     last_active_at: str | None = None
+    message_count: int | None = None
+    active_run_status: str | None = None
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> SessionDTO:
@@ -40,6 +42,8 @@ class SessionDTO:
             agent_id=_d(data, "agent_id"),
             created_at=_d(data, "created_at"),
             last_active_at=_d(data, "last_active_at"),
+            message_count=_d(data, "message_count"),
+            active_run_status=_d(data, "active_run_status"),
         )
 
 

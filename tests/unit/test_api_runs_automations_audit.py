@@ -81,6 +81,33 @@ async def test_run_detail(make_api, db):
 
 
 @pytest.mark.asyncio
+async def test_run_list(make_api, db):
+    """T40 — owner-scoped runs listing with filters + pagination."""
+    u = await _make_user("runs-key")
+    await _make_run(u.id, status="completed")
+    await _make_run(u.id, status="failed")
+    # another owner's run must be invisible
+    other = await _make_user("other-key")
+    await _make_run(other.id, status="running")
+    headers = {"X-API-Key": "runs-key"}
+
+    async with make_api(services=ServiceContainer()) as ac:
+        r = await ac.get("/v1/runs", headers=headers)
+        assert r.status_code == 200
+        body = r.json()
+        assert len(body) == 2  # only this owner's runs
+        statuses = {x["status"] for x in body}
+        assert statuses == {"completed", "failed"}
+
+        filtered = await ac.get("/v1/runs", params={"status": "failed"}, headers=headers)
+        assert len(filtered.json()) == 1
+        assert filtered.json()[0]["status"] == "failed"
+
+        one = await ac.get("/v1/runs", params={"limit": 1}, headers=headers)
+        assert len(one.json()) == 1
+
+
+@pytest.mark.asyncio
 async def test_run_cancel(make_api, db):
     u = await _make_user("runs-key")
     run = await _make_run(u.id, status="running")

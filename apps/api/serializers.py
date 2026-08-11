@@ -32,7 +32,13 @@ def user_to_dict(u: User) -> dict:
     }
 
 
-def session_to_dict(s: Session, *, messages: list[Message] | None = None) -> dict:
+def session_to_dict(
+    s: Session,
+    *,
+    messages: list[Message] | None = None,
+    message_count: int | None = None,
+    active_run_status: str | None = None,
+) -> dict:
     data = {
         "id": _u(s.id),
         "owner_id": _u(s.owner_id),
@@ -46,6 +52,10 @@ def session_to_dict(s: Session, *, messages: list[Message] | None = None) -> dic
         "created_at": _iso(s.created_at),
         "last_active_at": _iso(s.last_active_at),
     }
+    if message_count is not None:
+        data["message_count"] = message_count
+    if active_run_status is not None:
+        data["active_run_status"] = active_run_status
     if messages is not None:
         data["messages"] = [message_to_dict(m) for m in messages]
     return data

@@ -346,10 +346,11 @@ class RunRunner:
         from personal_ai_os.agent_runtime import streams
 
         terminal = "run.completed"
+        approval_info: dict | None = None
         try:
             interrupt_payload = await self._stream(run_id, initial, config)
             if interrupt_payload is not None:
-                await self._handle_approval_interrupt(run_id, interrupt_payload)
+                approval_info = await self._handle_approval_interrupt(run_id, interrupt_payload)
                 terminal = "approval.required"
             else:
                 await self._finalize(run_id, success=True)
@@ -363,7 +364,10 @@ class RunRunner:
                 status = "waiting_approval"
             elif terminal == "run.failed":
                 status = "failed"
-            push_live(run_id, terminal, {"run_id": str(run_id), "status": status})
+            payload: dict = {"run_id": str(run_id), "status": status}
+            if approval_info is not None:
+                payload.update(approval_info)
+            push_live(run_id, terminal, payload)
             streams.unregister(run_id)
             self._bg_tasks.pop(str(run_id), None)
 
@@ -711,6 +715,14 @@ class RunRunner:
                     },
                 )
             )
+        # T43: return enough context for the SSE terminal event to be enriched
+        # so the CLI can render the approval card without an extra list fetch.
+        return {
+            "approval_id": str(approval_uuid),
+            "tool_name": tool_name,
+            "risk_level": int(risk_level or 0),
+            "action_summary": f"执行工具 {tool_name}",
+        }
 
     async def _finalize(self, run_id: uuid.UUID, *, success: bool) -> None:
         self._cleanup_bookkeeping(str(run_id))

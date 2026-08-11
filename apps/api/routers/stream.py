@@ -5,11 +5,18 @@ For a run that is still executing (streaming started via
 queue and forwards ``thinking.delta`` / ``text.delta`` / ``tool.*`` /
 ``run.completed`` as they happen. Once a run has finished, the same endpoint
 replays its persisted ``run_steps`` (blueprint §42).
+
+Every event is wrapped in the versioned envelope (T41): ``schema_version``,
+``event_id``, ``seq`` (monotonic per stream), ``timestamp`` and ``run_id`` are
+added alongside the payload fields, so live and replay share one serializer
+while staying backward-compatible with clients that read specific fields.
 """
 
 from __future__ import annotations
 
 import json
+import uuid
+from datetime import UTC, datetime
 from uuid import UUID
 
 from fastapi import APIRouter, Depends
@@ -17,17 +24,32 @@ from sqlalchemy import select
 from sse_starlette.sse import EventSourceResponse
 
 from personal_ai_os.agent_runtime import streams
-from personal_ai_os.db.models import Run, RunStep
+from personal_ai_os.db.models import Approval, Run, RunStep
 from personal_ai_os.db.session import session_scope
 
 from ..deps import resolve_user
 
 router = APIRouter(prefix="/v1/runs", tags=["stream"])
 
+_TERMINAL_EVENTS = ("run.completed", "run.failed", "run.cancelled", "approval.required")
 
-def _step_event(step: RunStep) -> dict | None:
-    """Map a persisted RunStep to an SSE event payload."""
-    data = {
+
+def _envelope(event: str, data: dict, seq: int) -> dict:
+    """Wrap a payload in the versioned SSE envelope (additive, compatible)."""
+    wrapped: dict = {
+        "schema_version": 1,
+        "event_id": str(uuid.uuid4()),
+        "seq": seq,
+        "timestamp": datetime.now(UTC).isoformat(),
+        "run_id": data.get("run_id"),
+    }
+    wrapped.update(data)
+    return {"event": event, "data": json.dumps(wrapped, ensure_ascii=False)}
+
+
+def _step_event(step: RunStep) -> tuple[str, dict] | None:
+    """Map a persisted RunStep to (event, payload)."""
+    data: dict = {
         "run_id": str(step.run_id),
         "step_id": str(step.id),
         "step_type": step.step_type,
@@ -50,7 +72,7 @@ def _step_event(step: RunStep) -> dict | None:
         return None  # run.completed is emitted from the run status at the end
     else:
         event = step_type
-    return {"event": event, "data": json.dumps(data, ensure_ascii=False)}
+    return event, data
 
 
 @router.get("/{run_id}/stream")
@@ -70,10 +92,12 @@ async def stream_run(run_id: UUID, user=Depends(resolve_user)):
         # Live path: the run is currently executing and has a live queue.
         live = streams.get(run_id)
         if live is not None:
+            seq = 0
             while True:
                 event = await live.get()
-                yield {"event": event["event"], "data": json.dumps(event["data"], ensure_ascii=False)}
-                if event["event"] in ("run.completed", "run.failed", "run.cancelled", "approval.required"):
+                seq += 1
+                yield _envelope(event["event"], event["data"], seq)
+                if event["event"] in _TERMINAL_EVENTS:
                     break
             return
 
@@ -88,35 +112,65 @@ async def stream_run(run_id: UUID, user=Depends(resolve_user)):
             status = run.status
             state = run.state or {}
 
-        yield {
-            "event": "run.started",
-            "data": json.dumps({"run_id": str(run.id), "status": status}, ensure_ascii=False),
-        }
+        seq = 0
+        seq += 1
+        yield _envelope(
+            "run.started",
+            {"run_id": str(run.id), "status": status},
+            seq,
+        )
         # Replay the chain-of-thought (not token-streamed after the fact, but
         # surfaced so the CLI/UI shows it consistently for fast runs too).
         thinking = state.get("thinking")
         if thinking:
-            yield {
-                "event": "thinking.delta",
-                "data": json.dumps({"text": thinking, "replay": True}, ensure_ascii=False),
-            }
+            seq += 1
+            yield _envelope(
+                "thinking.delta",
+                {"text": thinking, "replay": True},
+                seq,
+            )
         for step in steps:
-            event = _step_event(step)
-            if event is not None:
-                yield event
+            mapped = _step_event(step)
+            if mapped is None:
+                continue
+            seq += 1
+            yield _envelope(mapped[0], mapped[1], seq)
         final = state.get("final_response")
         if final and status == "completed":
-            yield {
-                "event": "text.delta",
-                "data": json.dumps({"text": final, "replay": True}, ensure_ascii=False),
-            }
+            seq += 1
+            yield _envelope(
+                "text.delta",
+                {"text": final, "replay": True},
+                seq,
+            )
+        seq += 1
         if status == "completed":
-            yield {"event": "run.completed", "data": json.dumps({"run_id": str(run.id)})}
+            yield _envelope("run.completed", {"run_id": str(run.id)}, seq)
         elif status == "failed":
-            yield {"event": "run.failed", "data": json.dumps({"run_id": str(run.id)})}
+            yield _envelope("run.failed", {"run_id": str(run.id)}, seq)
         elif status == "waiting_approval":
-            yield {"event": "approval.required", "data": json.dumps({"run_id": str(run.id)})}
+            payload: dict = {"run_id": str(run.id)}
+            # T43: enrich the replay terminal with the pending approval record so
+            # the CLI renders the approval card without a follow-up fetch.
+            async with session_scope() as s:
+                appr = (
+                    await s.execute(
+                        select(Approval)
+                        .where(Approval.run_id == run.id, Approval.status == "pending")
+                        .order_by(Approval.created_at.desc())
+                    )
+                ).scalars().first()
+                if appr is not None:
+                    payload.update(
+                        {
+                            "approval_id": str(appr.id),
+                            "tool_name": appr.tool_name,
+                            "risk_level": appr.risk_level,
+                            "action_summary": appr.action_summary,
+                        }
+                    )
+            yield _envelope("approval.required", payload, seq)
         elif status == "cancelled":
-            yield {"event": "run.cancelled", "data": json.dumps({"run_id": str(run.id)})}
+            yield _envelope("run.cancelled", {"run_id": str(run.id)}, seq)
 
     return EventSourceResponse(event_generator())

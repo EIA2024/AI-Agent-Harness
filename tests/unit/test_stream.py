@@ -94,6 +94,63 @@ async def test_stream_owner_isolation(make_api, db):
 
 
 @pytest.mark.asyncio
+async def test_stream_events_have_versioned_envelope(make_api, db):
+    """T41 — every SSE event carries schema_version / seq / event_id / timestamp."""
+    u, run = await _make_user_and_run()
+    headers = {"X-API-Key": u.api_key}
+
+    async with make_api(services=ServiceContainer()) as ac:
+        _, body = await _collect_stream(ac, f"/v1/runs/{run.id}/stream", headers)
+
+    assert '"schema_version": 1' in body
+    assert '"event_id":' in body
+    assert '"seq": 1' in body
+    assert '"timestamp":' in body
+    assert '"run_id":' in body
+
+
+@pytest.mark.asyncio
+async def test_stream_approval_replay_is_enriched(make_api, db):
+    """T43 — replay of a waiting_approval run surfaces the pending approval."""
+    from personal_ai_os.db.models import Approval
+
+    u = User(username=f"u{uuid.uuid4().hex[:8]}", api_key="stream-appr-key")
+    headers = {"X-API-Key": "stream-appr-key"}
+    async with session_scope() as s:
+        s.add(u)
+        await s.flush()
+        run = Run(
+            owner_id=u.id,
+            status="waiting_approval",
+            input={"text": "hi"},
+            started_at=datetime.now(UTC),
+        )
+        s.add(run)
+        await s.flush()
+        s.add(
+            Approval(
+                run_id=run.id,
+                owner_id=u.id,
+                action_summary="send email",
+                tool_name="mail.send",
+                arguments_preview={"to": "x@y.z"},
+                risk_level=3,
+                status="pending",
+            )
+        )
+        await s.flush()
+
+    async with make_api(services=ServiceContainer()) as ac:
+        _, body = await _collect_stream(ac, f"/v1/runs/{run.id}/stream", headers)
+
+    assert "event: approval.required" in body
+    assert '"approval_id":' in body
+    assert '"tool_name": "mail.send"' in body
+    assert '"risk_level": 3' in body
+    assert '"action_summary": "send email"' in body
+
+
+@pytest.mark.asyncio
 async def test_stream_unknown_run(make_api):
     u = User(username=f"u{uuid.uuid4().hex[:8]}", api_key="stream-auth-key")
     async with session_scope() as s:

@@ -13,7 +13,6 @@ from typing import TextIO
 
 import typer
 
-from personal_ai_os.cli.api.errors import APIError
 from personal_ai_os.cli.bootstrap import build_client
 from personal_ai_os.cli.commands.table_output import emit, short_id
 
@@ -22,18 +21,7 @@ app = typer.Typer(help="Manage runs")
 
 async def _list_runs(*, limit: int, json_mode: bool, stdout: TextIO, stderr: TextIO) -> None:
     async with build_client() as client:
-        sessions = await client.list_sessions(limit=200)
-        runs = []
-        for session in sessions:
-            run_id = session.active_run_id
-            if not run_id:
-                continue
-            try:
-                runs.append(await client.get_run(run_id))
-            except APIError:
-                continue
-            if len(runs) >= limit:
-                break
+        runs = await client.list_runs(limit=limit)
     rows = [
         {
             "id": short_id(r.id),
