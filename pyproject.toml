@@ -41,9 +41,13 @@ packages = ["src/personal_ai_os"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
 testpaths = ["tests"]
 filterwarnings = [
-    "ignore::DeprecationWarning",
+    # Test-infra edge: aiosqlite Connection.__del__ firing after the event loop
+    # closes under `-W error`. Not a production defect; the default fixture loop
+    # scope is set explicitly above to keep the async engine/loop lifetime tidy.
+    "ignore::pytest.PytestUnraisableExceptionWarning",
 ]
 
 [tool.ruff]

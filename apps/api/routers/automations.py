@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -103,7 +103,7 @@ async def run_automation(
         a = result.scalar_one_or_none()
         if a is None:
             raise HTTPException(status_code=404, detail="Automation not found")
-        a.last_run_at = datetime.utcnow()
+        a.last_run_at = datetime.now(UTC)
         await s.flush()
 
     if services.scheduler is None:

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
+from datetime import UTC, datetime
 
 import pytest
 
@@ -33,7 +33,7 @@ class FakeMemoryStore:
                 source_id=None,
                 sensitivity="personal",
                 status="active",
-                created_at=datetime.utcnow(),
+                created_at=datetime.now(UTC),
             )
         ]
 

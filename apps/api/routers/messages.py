@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -67,7 +67,7 @@ async def post_message(
         sess = await s.get(Session, session_id)
         if sess is not None:
             sess.active_run_id = run_id
-            sess.last_active_at = datetime.utcnow()
+            sess.last_active_at = datetime.now(UTC)
 
     return {
         "run_id": str(run_id),

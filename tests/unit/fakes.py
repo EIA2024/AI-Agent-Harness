@@ -8,7 +8,7 @@ deterministic doubles — no real connectors involved.
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
+from datetime import UTC, datetime
 
 from personal_ai_os.common.models import (
     ApprovalRequiredError,
@@ -178,7 +178,7 @@ def make_memory(content: str, scope: str = "global", score: float = 0.5, type_: 
         source_id=None,
         sensitivity="personal",
         status="active",
-        created_at=datetime.utcnow(),
+        created_at=datetime.now(UTC),
         score=score,
     )
 

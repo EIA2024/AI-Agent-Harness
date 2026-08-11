@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -127,7 +127,7 @@ async def update_memory(memory_id: UUID, body: MemoryUpdateBody, user=Depends(re
             m.confidence = body.confidence
         if body.status is not None:
             m.status = body.status
-        m.updated_at = datetime.utcnow()
+        m.updated_at = datetime.now(UTC)
         await s.flush()
         await s.refresh(m)
         return memory_to_dict(m)
@@ -144,7 +144,7 @@ async def forget_memory(memory_id: UUID, user=Depends(resolve_user)) -> dict:
         if m is None:
             raise HTTPException(status_code=404, detail="Memory not found")
         m.status = "forgotten"
-        m.updated_at = datetime.utcnow()
+        m.updated_at = datetime.now(UTC)
         await s.flush()
         await s.refresh(m)
         return memory_to_dict(m)

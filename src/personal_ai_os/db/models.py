@@ -7,7 +7,7 @@ models through the async session factory in `.session`.
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
+from datetime import UTC, datetime
 
 from sqlalchemy import (
     JSON,
@@ -22,6 +22,11 @@ from sqlalchemy import (
 )
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+
+
+def _utcnow() -> datetime:
+    """Timezone-aware UTC now, used as the column default."""
+    return datetime.now(UTC)
 
 
 def _uuid() -> uuid.UUID:
@@ -45,7 +50,7 @@ class User(Base):
     api_key: Mapped[str | None] = mapped_column(String(128), unique=True)
     timezone: Mapped[str] = mapped_column(String(64), default="UTC")
     config: Mapped[dict] = mapped_column(JSON, default=dict)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
 
 class Agent(Base):
@@ -55,7 +60,7 @@ class Agent(Base):
     owner_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"))
     name: Mapped[str] = mapped_column(String(120))
     system_prompt: Mapped[str | None] = mapped_column(Text)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
 
 class ExternalIdentity(Base):
@@ -68,7 +73,7 @@ class ExternalIdentity(Base):
     external_user_id: Mapped[str] = mapped_column(String(200))
     display_name: Mapped[str | None] = mapped_column(String(200))
     metadata_: Mapped[dict] = mapped_column("metadata", JSON, default=dict)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
 
 class Project(Base):
@@ -80,7 +85,7 @@ class Project(Base):
     description: Mapped[str | None] = mapped_column(Text)
     config: Mapped[dict] = mapped_column(JSON, default=dict)
     status: Mapped[str] = mapped_column(String(32), default="active")
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
 
 class Session(Base):
@@ -101,8 +106,8 @@ class Session(Base):
     # reject the related flush ordering. The app enforces referential
     # integrity via the runs.session_id FK.
     active_run_id: Mapped[uuid.UUID | None] = mapped_column(PG_UUID(as_uuid=True), index=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
-    last_active_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    last_active_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
 
 class Message(Base):
@@ -116,7 +121,7 @@ class Message(Base):
     content: Mapped[str] = mapped_column(Text, default="")
     tool_name: Mapped[str | None] = mapped_column(String(200))
     metadata_: Mapped[dict] = mapped_column("metadata", JSON, default=dict)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
 
 class Run(Base):
@@ -135,7 +140,7 @@ class Run(Base):
     error: Mapped[dict | None] = mapped_column(JSON)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
 
 class RunStep(Base):
@@ -184,7 +189,7 @@ class Approval(Base):
     status: Mapped[str] = mapped_column(String(32), default="pending")
     approved_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"))
     expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
 
 class MemoryRow(Base):
@@ -206,8 +211,8 @@ class MemoryRow(Base):
     sensitivity: Mapped[str] = mapped_column(String(32), default="personal")
     status: Mapped[str] = mapped_column(String(32), default="active")
     valid_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
 
 class MemoryLink(Base):
@@ -218,7 +223,7 @@ class MemoryLink(Base):
     target_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("memories.id"))
     relation: Mapped[str] = mapped_column(String(32))  # superseded_by | related_to | ...
     confidence: Mapped[float] = mapped_column(Float, default=1.0)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
 
 class Skill(Base):
@@ -233,8 +238,8 @@ class Skill(Base):
     status: Mapped[str] = mapped_column(String(32), default="draft")
     source: Mapped[str] = mapped_column(String(32), default="builtin")
     risk_level: Mapped[int] = mapped_column(Integer, default=0)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
 
 class Automation(Base):
@@ -254,7 +259,7 @@ class Automation(Base):
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     last_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     next_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
 
 class Artifact(Base):
@@ -270,7 +275,7 @@ class Artifact(Base):
     size_bytes: Mapped[int] = mapped_column(Integer, default=0)
     storage_path: Mapped[str] = mapped_column(String(500))
     metadata_: Mapped[dict] = mapped_column("metadata", JSON, default=dict)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
 
 class AuditEvent(Base):
@@ -284,7 +289,7 @@ class AuditEvent(Base):
     resource_type: Mapped[str | None] = mapped_column(String(64))
     resource_id: Mapped[str | None] = mapped_column(String(200))
     details: Mapped[dict] = mapped_column(JSON)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
 
 # ---------------------------------------------------------------------------

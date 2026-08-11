@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
+from datetime import UTC, datetime
 
 import pytest
 
@@ -35,7 +35,7 @@ async def _make_user(api_key: str) -> User:
 
 async def _make_run(owner_id, *, status: str = "running") -> Run:
     async with session_scope() as s:
-        run = Run(owner_id=owner_id, status=status, input={"text": "hi"}, started_at=datetime.utcnow())
+        run = Run(owner_id=owner_id, status=status, input={"text": "hi"}, started_at=datetime.now(UTC))
         s.add(run)
         await s.flush()
         await s.refresh(run)

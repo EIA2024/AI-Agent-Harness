@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -52,7 +52,7 @@ async def cancel_run(
         if run is None:
             raise HTTPException(status_code=404, detail="Run not found")
         run.status = "cancelled"
-        run.completed_at = datetime.utcnow()
+        run.completed_at = datetime.now(UTC)
         await s.flush()
         await s.refresh(run)
         data = run_to_dict(run)
@@ -93,7 +93,7 @@ async def resume_run(
         if run.status in ("completed", "failed", "cancelled"):
             raise HTTPException(status_code=409, detail=f"Cannot resume run in status '{run.status}'")
         run.status = "running"
-        run.started_at = run.started_at or datetime.utcnow()
+        run.started_at = run.started_at or datetime.now(UTC)
         await s.flush()
         await s.refresh(run)
         data = run_to_dict(run)

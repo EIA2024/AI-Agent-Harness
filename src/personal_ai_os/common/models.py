@@ -6,7 +6,7 @@ All departments implement against these models and protocols.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Literal, TypedDict
 from uuid import UUID, uuid4
@@ -345,7 +345,7 @@ class ApprovalRequest:
         self.requires_auth_method = requires_auth_method
         self.expires_at = expires_at
         self.status = status
-        self.created_at = created_at or datetime.utcnow()
+        self.created_at = created_at or datetime.now(UTC)
 
     def to_dict(self) -> dict:
         return {
@@ -389,7 +389,7 @@ class ApprovalReceipt:
         self.tool_name = tool_name
         self.argument_hash = argument_hash
         self.expires_at = expires_at
-        self.created_at = datetime.utcnow()
+        self.created_at = datetime.now(UTC)
 
     def to_dict(self) -> dict:
         return {
@@ -684,7 +684,7 @@ class DomainEvent:
                  id: UUID | None = None, timestamp: datetime | None = None):
         self.id = id or uuid4()
         self.type = type
-        self.timestamp = timestamp or datetime.utcnow()
+        self.timestamp = timestamp or datetime.now(UTC)
         self.owner_id = owner_id
         self.run_id = run_id
         self.session_id = session_id
@@ -773,5 +773,5 @@ class InboundMessage:
         self.text = text
         self.attachments = attachments or []
         self.reply_to = reply_to
-        self.timestamp = timestamp or datetime.utcnow()
+        self.timestamp = timestamp or datetime.now(UTC)
         self.metadata = metadata or {}

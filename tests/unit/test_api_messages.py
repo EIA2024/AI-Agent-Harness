@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
+from datetime import UTC, datetime
 
 import pytest
 
@@ -30,8 +30,8 @@ class FakeRunner:
                 session_id=session_id,
                 status="completed",
                 input={"text": user_input},
-                started_at=datetime.utcnow(),
-                completed_at=datetime.utcnow(),
+                started_at=datetime.now(UTC),
+                completed_at=datetime.now(UTC),
             )
             s.add(run)
             await s.flush()

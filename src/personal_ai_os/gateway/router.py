@@ -7,7 +7,7 @@ first contact. Sessions are persisted via the shared async SQLAlchemy factory.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 from uuid import UUID
 
 from sqlalchemy import select
@@ -55,7 +55,7 @@ class SessionRouter:
             )
             sess = result.scalar_one_or_none()
             if sess is not None:
-                sess.last_active_at = datetime.utcnow()
+                sess.last_active_at = datetime.now(UTC)
                 if project_id is not None:
                     sess.project_id = project_id
                 if self.agent_id is not None and sess.agent_id is None:
@@ -88,7 +88,7 @@ class SessionRouter:
         async with session_scope() as session:
             sess = await session.get(Session, _coerce_uuid(session_id))
             if sess is not None:
-                sess.last_active_at = datetime.utcnow()
+                sess.last_active_at = datetime.now(UTC)
 
     async def archive(self, session_id: UUID | str) -> None:
         """Mark a session as archived (no-op when missing)."""

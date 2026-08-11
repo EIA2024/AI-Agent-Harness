@@ -11,7 +11,7 @@ Implements the ``MemoryStore`` protocol (``common/protocols.py``) on top of
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 from uuid import UUID
 
 from sqlalchemy import delete, or_, select
@@ -124,8 +124,8 @@ class SQLMemoryStore:
                 source_event_id=memory.source_event_id,
                 sensitivity=memory.sensitivity,
                 status="active",
-                created_at=datetime.utcnow(),
-                updated_at=datetime.utcnow(),
+                created_at=datetime.now(UTC),
+                updated_at=datetime.now(UTC),
             )
             session.add(row)
             await session.flush()
@@ -164,7 +164,7 @@ class SQLMemoryStore:
                 row.confidence = confidence
             if sensitivity is not None:
                 row.sensitivity = sensitivity
-            row.updated_at = datetime.utcnow()
+            row.updated_at = datetime.now(UTC)
             await session.flush()
             return self.to_memory(row)
 
@@ -177,7 +177,7 @@ class SQLMemoryStore:
             if row is None:
                 return
             row.status = "deleted"
-            row.updated_at = datetime.utcnow()
+            row.updated_at = datetime.now(UTC)
 
             await session.execute(
                 delete(MemoryLink).where(

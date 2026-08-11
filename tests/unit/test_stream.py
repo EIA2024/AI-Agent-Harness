@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
+from datetime import UTC, datetime
 
 import pytest
 
@@ -21,22 +21,22 @@ async def _make_user_and_run(*, status: str = "completed") -> tuple[User, Run]:
             owner_id=u.id,
             status=status,
             input={"text": "hi"},
-            started_at=datetime.utcnow(),
-            completed_at=datetime.utcnow() if status == "completed" else None,
+            started_at=datetime.now(UTC),
+            completed_at=datetime.now(UTC) if status == "completed" else None,
         )
         s.add(run)
         await s.flush()
-        s.add(RunStep(run_id=run.id, step_type="decide", status="completed", started_at=datetime.utcnow()))
+        s.add(RunStep(run_id=run.id, step_type="decide", status="completed", started_at=datetime.now(UTC)))
         s.add(
             RunStep(
                 run_id=run.id,
                 step_type="tool",
                 status="completed",
                 data={"tool_name": "web.search"},
-                started_at=datetime.utcnow(),
+                started_at=datetime.now(UTC),
             )
         )
-        s.add(RunStep(run_id=run.id, step_type="respond", status="completed", started_at=datetime.utcnow()))
+        s.add(RunStep(run_id=run.id, step_type="respond", status="completed", started_at=datetime.now(UTC)))
         await s.flush()
         await s.refresh(run)
         return u, run

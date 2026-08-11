@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 import pytest
@@ -111,7 +111,7 @@ async def test_reject_sets_status_and_receipt_is_not_verifiable(engine, make_req
 
 
 async def test_expired_request_auto_expires_and_cannot_resolve(engine, make_request, owner_id):
-    request = await engine.create_request(**make_request(expires_at=datetime.utcnow() - timedelta(seconds=1)))
+    request = await engine.create_request(**make_request(expires_at=datetime.now(UTC) - timedelta(seconds=1)))
 
     fetched = await engine.get_request(request.id)
     assert fetched.status == "expired"
