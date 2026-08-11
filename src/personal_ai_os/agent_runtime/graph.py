@@ -67,6 +67,8 @@ class RuntimeState(AgentState, total=False):
     thinking: str
     #: cached context build from build_context (avoids rebuilds in decide)
     _cached_context: dict
+    #: MemGPT-style compaction: summary of turns older than the recent window
+    conversation_summary: str
 
 
 # ---------------------------------------------------------------------------
@@ -277,6 +279,7 @@ async def intake(state: AgentState, deps: _Deps) -> dict:
         "status": "intake",
         "task": task,
         "messages": state.get("messages") or [],
+        "conversation_summary": state.get("conversation_summary") or "",
         "context_items": state.get("context_items") or [],
         "tool_results": state.get("tool_results") or [],
         "plan": state.get("plan") or [],

@@ -34,10 +34,16 @@ from personal_ai_os.common.models import (
     ErrorCode,
     EventTypes,
 )
-from personal_ai_os.db.models import Approval, Message, Run, RunStep, ToolCall
+from personal_ai_os.common.utils import approximate_tokens
+from personal_ai_os.context_engine.summarizer import ConversationSummarizer
+from personal_ai_os.db.models import Approval, Message, Run, RunStep, Session, ToolCall
 from personal_ai_os.db.session import session_scope
 
 _MAX_TOOL_RESULTS_PERSISTED = 50
+
+#: Token budget for the session's verbatim recent-message window (MemGPT
+#: compaction: everything older is summarized, the newest stays in full).
+RECENT_WINDOW_TOKENS = 6000
 
 
 def _now() -> datetime:
@@ -88,6 +94,7 @@ class RunRunner:
         self._persisted_tool_ids: dict[str, set[str]] = {}
         self._persisted_message_count: dict[str, int] = {}
         self._bg_tasks: dict[str, asyncio.Task] = {}  # streaming background runs
+        self._summarizer_impl: ConversationSummarizer | None = None
 
     # ------------------------------------------------------------------ start
 
@@ -122,6 +129,92 @@ class RunRunner:
                 continue  # tool-call-only frames are not conversation
             history.append({"role": m.role, "content": m.content or ""})
         return history
+
+    # -- session conversation memory (MemGPT-style compaction) ---------------
+
+    def _summarizer(self) -> ConversationSummarizer:
+        if self._summarizer_impl is None:
+            self._summarizer_impl = ConversationSummarizer(self.model_provider)
+        return self._summarizer_impl
+
+    async def _load_session_memory(self, session_id) -> tuple[str, list[dict]]:
+        """Load (summary, recent_messages) from the session's managed memory.
+
+        Falls back to raw DB history for sessions created before this feature.
+        """
+        async with session_scope() as session:
+            sess = await session.get(Session, session_id)
+            if sess is None:
+                return "", []
+            owner_id = sess.owner_id
+            ctx = sess.context or {}
+        summary = str(ctx.get("conversation_summary") or "")
+        recent = ctx.get("recent_messages") or []
+        if isinstance(recent, list) and recent:
+            clean = [
+                {"role": m.get("role"), "content": m.get("content") or ""}
+                for m in recent
+                if isinstance(m, dict) and m.get("role") in ("user", "assistant") and m.get("content")
+            ]
+            return summary, clean
+        # Fallback: reconstruct a window from the raw messages table.
+        return summary, await self._load_session_history(session_id, owner_id)
+
+    async def _save_session_memory(self, session_id, summary: str, recent: list[dict]) -> None:
+        async with session_scope() as session:
+            sess = await session.get(Session, session_id)
+            if sess is None:
+                return
+            ctx = dict(sess.context or {})
+            ctx["conversation_summary"] = summary
+            ctx["recent_messages"] = recent[-30:]
+            sess.context = ctx
+
+    async def _compact_session_memory(self, run_id) -> None:
+        """Fold a finished run's turns into the session's managed memory.
+
+        If the recent window exceeds ``RECENT_WINDOW_TOKENS``, the oldest turns
+        that overflow are compressed into the running summary (MemGPT/Letta
+        compaction) instead of being dropped, so as much of the conversation as
+        fits the context budget is preserved.
+        """
+        async with session_scope() as s:
+            run = await s.get(Run, run_id)
+            if run is None or run.session_id is None:
+                return
+            session_id = run.session_id
+            state = dict(run.state or {})
+        if not state:
+            return
+
+        summary = str(state.get("conversation_summary") or "")
+        turns = [
+            {"role": m.get("role"), "content": m.get("content") or ""}
+            for m in (state.get("messages") or [])
+            if isinstance(m, dict) and m.get("role") in ("user", "assistant") and m.get("content")
+        ]
+        total = sum(approximate_tokens(t.get("content") or "") for t in turns)
+        if total <= RECENT_WINDOW_TOKENS:
+            await self._save_session_memory(session_id, summary, turns)
+            return
+
+        # Overflow → keep the newest within budget, summarize the rest.
+        keep: list[dict] = []
+        acc = 0
+        for t in reversed(turns):
+            n = approximate_tokens(t.get("content") or "")
+            if keep and acc + n > RECENT_WINDOW_TOKENS:
+                break
+            keep.append(t)
+            acc += n
+        keep.reverse()
+        overflow = turns[: len(turns) - len(keep)]
+        if overflow:
+            try:
+                summary = await self._summarizer().summarize(overflow, existing_summary=summary)
+            except Exception:  # noqa: BLE001 - summarization is best-effort
+                pass
+        await self._save_session_memory(session_id, summary, keep)
 
     async def _init_run(self, *, session_id, owner_id, user_input, agent_id=None):
         """Create the Run + user Message rows; return (run_id, initial_state)."""
@@ -171,14 +264,17 @@ class RunRunner:
                 )
             )
 
-        history = await self._load_session_history(session_uuid, owner_uuid, exclude_run_id=run_id)
+        # Managed session memory: compact summary of old turns + the recent
+        # window kept verbatim (MemGPT-style compaction).
+        summary, recent = await self._load_session_memory(session_uuid)
         initial: dict = {
             "run_id": str(run_id),
             "session_id": str(session_uuid),
             "owner_id": str(owner_uuid),
             "agent_id": str(agent_uuid) if agent_uuid else None,
             "user_input": user_input,
-            "messages": history,
+            "messages": recent,
+            "conversation_summary": summary,
             "context_items": [],
             "task": {},
             "plan": [],
@@ -193,9 +289,9 @@ class RunRunner:
             "model_usage": {},
         }
         self._persisted_tool_ids[str(run_id)] = set()
-        # state.messages starts with the loaded history (already in the DB);
+        # state.messages starts with the loaded recent window (already in DB);
         # only messages added after this point (assistant replies) are new.
-        self._persisted_message_count[str(run_id)] = len(history)
+        self._persisted_message_count[str(run_id)] = len(recent)
         return run_id, initial
 
     async def start(
@@ -217,6 +313,7 @@ class RunRunner:
                 await self._handle_approval_interrupt(run_id, interrupt_payload)
             else:
                 await self._finalize(run_id, success=True)
+                await self._compact_session_memory(run_id)
             return await self.get_run(run_id)
         except Exception as exc:
             await self._fail(run_id, exc)
@@ -256,6 +353,7 @@ class RunRunner:
                 terminal = "approval.required"
             else:
                 await self._finalize(run_id, success=True)
+                await self._compact_session_memory(run_id)
         except Exception as exc:
             await self._fail(run_id, exc)
             terminal = "run.failed"

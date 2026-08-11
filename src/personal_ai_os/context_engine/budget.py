@@ -13,13 +13,17 @@ from collections import defaultdict
 
 from personal_ai_os.common.utils import approximate_tokens
 
-# Default allocations from blueprint §13.2. Sums to 1.0.
+# Default allocations from blueprint §13.2 (extended with a conversation-summary
+# slice for MemGPT-style compaction). Sums to 1.0.
 DEFAULT_ALLOCATIONS: dict[str, float] = {
     "system_identity": 0.10,
     "user_profile": 0.05,
     "skills": 0.08,
     "memories": 0.12,
-    "conversation": 0.25,
+    # compact summary of turns older than the recent window (never dropped)
+    "conversation_summary": 0.06,
+    # most-recent turns kept verbatim
+    "conversation": 0.19,
     "task_state": 0.15,
     "tool_results": 0.15,
     "generation_reserve": 0.10,

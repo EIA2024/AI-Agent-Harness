@@ -32,7 +32,7 @@ _UNTRUSTED = {
 }
 
 _DEFAULT_SECTIONS = ("system_identity", "user_profile", "skills", "memories",
-                     "task_state", "conversation", "tool_results")
+                     "task_state", "conversation_summary", "conversation", "tool_results")
 
 
 class ContextEngine:
@@ -122,6 +122,7 @@ class ContextEngine:
             "skills": skills,
             "memories": memories,
             "task_state": task_state,
+            "conversation_summary": state.get("conversation_summary") or "",
             "conversation": "\n".join((m.get("content") or "") for m in conversation),
             "tool_results": "\n".join((m.get("content") or "") for m in tool_messages),
             "user_input": state.get("user_input", ""),
@@ -240,19 +241,33 @@ class ContextEngine:
         return "\n".join(parts)
 
     def _tier3_conversation(self, state: dict, budget: ContextBudget) -> list[dict]:
+        # MemGPT-style compaction: older turns live as a compact summary (never
+        # dropped), the most-recent turns stay verbatim. The summary is a
+        # system-frame so the model reads it as memory, not something to reply to.
+        items: list[dict] = []
+        summary = state.get("conversation_summary") or ""
+        if summary and summary.strip():
+            summary_budget = budget.token_limit("conversation_summary")
+            if budget.tokens_of(summary) > summary_budget:
+                summary = summary[: max(0, summary_budget * 4 - 40)] + " ..."
+            items.append(
+                {
+                    "role": "system",
+                    "content": f"[更早的对话摘要，帮助你保持对用户的连续记忆]\n{summary}",
+                }
+            )
+
         history = state.get("messages") or []
         # Preserve the natural interleaved order from the runtime: an assistant
         # tool-call frame must stay adjacent to its tool result, otherwise
-        # OpenAI-compatible endpoints (DeepSeek in particular) reject the turn
-        # ("tool must be a response to a preceding message with tool_calls").
-        # Keep user/assistant/system/tool roles in order; the tool_results
-        # budget is folded in here (see _tier4_tool_results).
+        # OpenAI-compatible endpoints (DeepSeek in particular) reject the turn.
         kept = [
             m for m in history
             if isinstance(m, dict) and m.get("role") in ("user", "assistant", "system", "tool")
         ]
         budget_total = budget.token_limit("conversation") + budget.token_limit("tool_results")
-        return self._fit_tail(kept[-10:], budget_total)
+        items.extend(self._fit_tail(kept[-10:], budget_total))
+        return items
 
     def _tier4_tool_results(self, state: dict, budget: ContextBudget) -> list[dict]:
         # In the real flow the runtime (observe) already folds tool frames into

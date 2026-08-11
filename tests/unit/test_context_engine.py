@@ -27,7 +27,8 @@ def test_default_allocations():
     assert budget.token_limit("user_profile") == 800
     assert budget.token_limit("skills") == 1280
     assert budget.token_limit("memories") == 1920
-    assert budget.token_limit("conversation") == 4000
+    assert budget.token_limit("conversation_summary") == 960
+    assert budget.token_limit("conversation") == 3040
     assert budget.token_limit("task_state") == 2400
     assert budget.token_limit("tool_results") == 2400
     assert budget.token_limit("generation_reserve") == 1600

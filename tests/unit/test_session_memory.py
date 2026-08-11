@@ -78,3 +78,52 @@ async def test_second_run_sees_first_exchange():
             select(Message).where(Message.run_id == uuid.UUID(r1["id"]))
         )).scalars().all()
         assert len(first_msgs) == 2  # 1 user + 1 assistant
+
+
+@pytest.mark.asyncio
+async def test_compaction_writes_summary_and_recent_window():
+    """When the conversation exceeds the recent-window budget, the oldest turns
+    are compressed into a summary and stored in session.context (MemGPT style)."""
+    from personal_ai_os.context_engine import ConversationSummarizer
+
+    async with session_scope() as s:
+        u = User(username=f"cmp{uuid.uuid4().hex[:8]}", api_key="k")
+        s.add(u)
+        await s.flush()
+        owner_id = u.id
+        sess = Session(owner_id=owner_id, channel="api", status="active")
+        s.add(sess)
+        await s.flush()
+        session_id = sess.id
+
+    runner, provider = make_runner([{"content": "收到。"}])
+    # give the runner a stub summarizer that echoes a fixed summary
+    runner._summarizer_impl = ConversationSummarizer(provider)
+
+    # Craft a run whose state has far more than RECENT_WINDOW_TOKENS of turns.
+    from personal_ai_os.agent_runtime.runner import RECENT_WINDOW_TOKENS
+    from personal_ai_os.db.models import Run
+
+    big_turn = {"role": "user", "content": "y" * (RECENT_WINDOW_TOKENS)}
+    async with session_scope() as s:
+        r = Run(owner_id=owner_id, session_id=session_id, status="completed", input={},
+                state={"messages": [big_turn, big_turn, big_turn, big_turn, big_turn, {"role": "assistant", "content": "你好"}]})
+        s.add(r)
+        await s.flush()
+        run_id = r.id
+
+    # the summarizer stub returns the provider's scripted content
+    async def _stub_summarize(messages, existing_summary=""):
+        return "摘要：用户提出了很多信息。"
+
+    runner._summarizer_impl.summarize = _stub_summarize  # type: ignore[method-assign]
+    await runner._compact_session_memory(run_id)
+
+    async with session_scope() as s:
+        sess = await s.get(Session, session_id)
+        ctx = sess.context or {}
+    assert ctx.get("conversation_summary") == "摘要：用户提出了很多信息。"
+    recent = ctx.get("recent_messages") or []
+    assert recent, "a recent window should remain"
+    total = sum(len(m.get("content") or "") // 4 for m in recent)
+    assert total <= RECENT_WINDOW_TOKENS + 200, f"recent window over budget: {total}"
