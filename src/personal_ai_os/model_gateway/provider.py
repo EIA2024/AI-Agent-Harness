@@ -280,6 +280,41 @@ class AnthropicProvider:
 # ---------------------------------------------------------------------------
 
 
+def _sanitize_tool_name(name: str) -> str:
+    """Make a tool name acceptable to strict OpenAI-compatible endpoints.
+
+    DeepSeek (and others) require tool names to match ``^[a-zA-Z0-9_-]+$`` —
+    our namespaces use dots (``calculator.evaluate``). Replace every character
+    outside the allowed set with ``_`` so the request passes schema validation.
+    """
+    return "".join(c if c.isalnum() or c in "_-" else "_" for c in name)
+
+
+def _sanitize_messages(messages: list[dict] | None) -> list[dict]:
+    """Sanitize tool names inside message history for strict endpoints.
+
+    DeepSeek rejects dotted tool names not just in the ``tools`` parameter but
+    also in ``assistant`` tool_call frames and ``tool`` result frames that are
+    replayed in later turns. Return a deep copy so the caller's history is
+    never mutated.
+    """
+    import copy
+
+    out: list[dict] = []
+    for msg in messages or []:
+        m = copy.deepcopy(msg)
+        if m.get("role") == "assistant" and m.get("tool_calls"):
+            for tc in m["tool_calls"]:
+                if isinstance(tc, dict):
+                    fn = tc.get("function")
+                    if isinstance(fn, dict) and fn.get("name"):
+                        fn["name"] = _sanitize_tool_name(str(fn["name"]))
+        if m.get("role") == "tool" and m.get("name"):
+            m["name"] = _sanitize_tool_name(str(m["name"]))
+        out.append(m)
+    return out
+
+
 class OpenAICompatibleProvider:
     """OpenAI-compatible ``/chat/completions`` adapter.
 
@@ -320,13 +355,36 @@ class OpenAICompatibleProvider:
         model = request.preferred_model or self.default_model
         payload: dict[str, Any] = {
             "model": model,
-            "messages": request.messages,
+            "messages": _sanitize_messages(request.messages),
             "max_tokens": request.max_tokens or 1024,
         }
         if request.temperature is not None:
             payload["temperature"] = request.temperature
+
+        # DeepSeek (and some other OpenAI-compatible endpoints) reject tool names
+        # that are not ^[a-zA-Z0-9_-]+$ — our namespaces use dots ("calculator.evaluate").
+        # Sanitize on the way out and map returned names back on the way in.
+        name_map: dict[str, str] = {}
         if request.tools:
-            payload["tools"] = request.tools  # already OpenAI function schemas
+            payload["tools"] = []
+            for tool in request.tools:
+                fn = tool.get("function", tool) if isinstance(tool, dict) else tool
+                original = fn.get("name")
+                if not original:
+                    payload["tools"].append(tool)
+                    continue
+                sanitized = _sanitize_tool_name(original)
+                if sanitized != original:
+                    name_map[sanitized] = original
+                    import copy
+
+                    adjusted = copy.deepcopy(tool)
+                    adjusted_fn = adjusted.get("function", adjusted) if isinstance(adjusted, dict) else adjusted
+                    if isinstance(adjusted_fn, dict):
+                        adjusted_fn["name"] = sanitized
+                    payload["tools"].append(adjusted)
+                else:
+                    payload["tools"].append(tool)
         if request.response_format:
             payload["response_format"] = request.response_format
 
@@ -351,6 +409,12 @@ class OpenAICompatibleProvider:
         message = choice.get("message") or {}
         content = message.get("content")
         tool_calls = message.get("tool_calls") or None
+        if tool_calls and name_map:
+            for tc in tool_calls:
+                if isinstance(tc, dict):
+                    fn = tc.get("function")
+                    if isinstance(fn, dict) and fn.get("name") in name_map:
+                        fn["name"] = name_map[fn["name"]]
 
         usage_raw = data.get("usage") or {}
         cached_tokens = 0

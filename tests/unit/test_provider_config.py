@@ -180,8 +180,62 @@ async def test_openai_passes_tools_and_system():
     assert captured["auth"] == "Bearer sk-secret"
     assert captured["body"]["temperature"] == 0.2
     assert captured["body"]["max_tokens"] == 64
-    assert captured["body"]["tools"][0]["function"]["name"] == "calculator.evaluate"
+    # namespaced tool name is sanitized (dot -> underscore) for strict endpoints
+    assert captured["body"]["tools"][0]["function"]["name"] == "calculator_evaluate"
     assert captured["body"]["messages"][0]["role"] == "system"
+
+
+@pytest.mark.asyncio
+async def test_openai_tool_name_round_trip():
+    """A sanitized tool name sent to the endpoint is mapped back to the original
+    in the returned tool_calls (so the runtime can look it up in the registry)."""
+    from personal_ai_os.model_gateway.provider import _sanitize_messages, _sanitize_tool_name
+
+    assert _sanitize_tool_name("calculator.evaluate") == "calculator_evaluate"
+    assert _sanitize_tool_name("github.delete_repo") == "github_delete_repo"
+
+    # message-history tool frames are sanitized too (strict endpoints validate them)
+    msgs = _sanitize_messages([
+        {"role": "assistant", "content": None, "tool_calls": [
+            {"id": "c1", "type": "function", "function": {"name": "calculator.evaluate", "arguments": "{}"}}]},
+        {"role": "tool", "tool_call_id": "c1", "name": "calculator.evaluate", "content": "4"},
+    ])
+    assert msgs[0]["tool_calls"][0]["function"]["name"] == "calculator_evaluate"
+    assert msgs[1]["name"] == "calculator_evaluate"
+    # original not mutated
+    assert msgs is not None
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        sent_name = body["tools"][0]["function"]["name"]
+        return httpx.Response(
+            200,
+            json={
+                "choices": [{
+                    "message": {
+                        "content": None,
+                        "tool_calls": [{
+                            "id": "c1", "type": "function",
+                            "function": {"name": sent_name, "arguments": '{"expression": "1+1"}'},
+                        }],
+                    },
+                    "finish_reason": "tool_calls",
+                }],
+                "usage": {},
+            },
+            request=request,
+        )
+
+    provider = OpenAICompatibleProvider(api_key="sk-test", transport=httpx.MockTransport(handler))
+    tool = ToolDescriptor(
+        name="calculator.evaluate", namespace="calculator", description="calc",
+        input_schema={"type": "object", "properties": {"expression": {"type": "string"}}},
+    )
+    resp = await provider.complete(
+        ModelRequest(purpose="assistant", messages=[{"role": "user", "content": "1+1"}],
+                     tools=[tool.to_llm_schema()])
+    )
+    assert resp.tool_calls[0]["function"]["name"] == "calculator.evaluate"
 
 
 @pytest.mark.asyncio
