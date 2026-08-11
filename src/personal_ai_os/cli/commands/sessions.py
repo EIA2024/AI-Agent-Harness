@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 import sys
 from typing import TextIO
@@ -10,6 +9,7 @@ from typing import TextIO
 import typer
 
 from personal_ai_os.cli.bootstrap import build_client
+from personal_ai_os.cli.commands.run_helper import run_admin
 from personal_ai_os.cli.commands.table_output import emit, short_id
 
 app = typer.Typer(help="Manage sessions")
@@ -40,7 +40,7 @@ def sessions_list(
     json: bool = typer.Option(False, "--json", help="Machine-readable JSON output"),
 ) -> None:
     """List sessions (newest activity first)."""
-    asyncio.run(_list_sessions(limit=limit, json_mode=json, stdout=sys.stdout, stderr=sys.stderr))
+    run_admin(lambda: _list_sessions(limit=limit, json_mode=json, stdout=sys.stdout, stderr=sys.stderr))
 
 
 async def _show_session(session_id: str, *, stdout: TextIO) -> None:
@@ -52,4 +52,4 @@ async def _show_session(session_id: str, *, stdout: TextIO) -> None:
 @app.command("show")
 def sessions_show(session_id: str) -> None:
     """Show a session's detail (incl. message history)."""
-    asyncio.run(_show_session(session_id, stdout=sys.stdout))
+    run_admin(lambda: _show_session(session_id, stdout=sys.stdout))

@@ -6,7 +6,6 @@ user's decision to the server, which owns policy + hash binding.
 
 from __future__ import annotations
 
-import asyncio
 import json
 import sys
 from typing import TextIO
@@ -14,6 +13,7 @@ from typing import TextIO
 import typer
 
 from personal_ai_os.cli.bootstrap import build_client
+from personal_ai_os.cli.commands.run_helper import run_admin
 from personal_ai_os.cli.commands.table_output import emit, short_id
 
 app = typer.Typer(help="Manage approvals")
@@ -50,7 +50,7 @@ def approvals_list(
     json: bool = typer.Option(False, "--json", help="Machine-readable JSON output"),
 ) -> None:
     """List approvals."""
-    asyncio.run(_list_approvals(status=status, json_mode=json, stdout=sys.stdout, stderr=sys.stderr))
+    run_admin(lambda: _list_approvals(status=status, json_mode=json, stdout=sys.stdout, stderr=sys.stderr))
 
 
 async def _resolve(approval_id: str, action: str, *, stdout: TextIO) -> None:
@@ -67,13 +67,13 @@ async def _resolve(approval_id: str, action: str, *, stdout: TextIO) -> None:
 @app.command("approve")
 def approvals_approve(approval_id: str) -> None:
     """Approve a pending approval."""
-    asyncio.run(_resolve(approval_id, "approve", stdout=sys.stdout))
+    run_admin(lambda: _resolve(approval_id, "approve", stdout=sys.stdout))
 
 
 @app.command("reject")
 def approvals_reject(approval_id: str) -> None:
     """Reject a pending approval."""
-    asyncio.run(_resolve(approval_id, "reject", stdout=sys.stdout))
+    run_admin(lambda: _resolve(approval_id, "reject", stdout=sys.stdout))
 
 
 async def _edit(approval_id: str, edited: str, *, stdout: TextIO) -> None:
@@ -96,4 +96,4 @@ def approvals_edit(
     json_arguments: str = typer.Option(..., "--json", help="Edited arguments as a JSON object"),
 ) -> None:
     """Edit a pending approval's arguments and approve (server re-hashes)."""
-    asyncio.run(_edit(approval_id, json_arguments, stdout=sys.stdout))
+    run_admin(lambda: _edit(approval_id, json_arguments, stdout=sys.stdout))

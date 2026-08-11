@@ -6,7 +6,6 @@ uses the session ``active_run_id`` workaround (same data the legacy CLI used).
 
 from __future__ import annotations
 
-import asyncio
 import json
 import sys
 from typing import TextIO
@@ -14,6 +13,7 @@ from typing import TextIO
 import typer
 
 from personal_ai_os.cli.bootstrap import build_client
+from personal_ai_os.cli.commands.run_helper import run_admin
 from personal_ai_os.cli.commands.table_output import emit, short_id
 
 app = typer.Typer(help="Manage runs")
@@ -42,7 +42,7 @@ def runs_list(
     json: bool = typer.Option(False, "--json", help="Machine-readable JSON output"),
 ) -> None:
     """List recent runs (via session active runs until T40 lands)."""
-    asyncio.run(_list_runs(limit=limit, json_mode=json, stdout=sys.stdout, stderr=sys.stderr))
+    run_admin(lambda: _list_runs(limit=limit, json_mode=json, stdout=sys.stdout, stderr=sys.stderr))
 
 
 async def _show_run(run_id: str, *, stdout: TextIO) -> None:
@@ -62,13 +62,13 @@ async def _show_run(run_id: str, *, stdout: TextIO) -> None:
 @app.command("show")
 def runs_show(run_id: str) -> None:
     """Show a run's full detail."""
-    asyncio.run(_show_run(run_id, stdout=sys.stdout))
+    run_admin(lambda: _show_run(run_id, stdout=sys.stdout))
 
 
 @app.command("get")
 def runs_get(run_id: str) -> None:
     """Legacy alias of ``runs show``."""
-    asyncio.run(_show_run(run_id, stdout=sys.stdout))
+    run_admin(lambda: _show_run(run_id, stdout=sys.stdout))
 
 
 async def _cancel_run(run_id: str, *, stdout: TextIO) -> None:
@@ -80,7 +80,7 @@ async def _cancel_run(run_id: str, *, stdout: TextIO) -> None:
 @app.command("cancel")
 def runs_cancel(run_id: str) -> None:
     """Cancel a running/pending run."""
-    asyncio.run(_cancel_run(run_id, stdout=sys.stdout))
+    run_admin(lambda: _cancel_run(run_id, stdout=sys.stdout))
 
 
 async def _resume_run(
@@ -98,4 +98,4 @@ def runs_resume(
     decision: str | None = typer.Option(None, help="approved | rejected | approved_with_edits"),
 ) -> None:
     """Resume a waiting run."""
-    asyncio.run(_resume_run(run_id, approval_id=approval_id, decision=decision, stdout=sys.stdout))
+    run_admin(lambda: _resume_run(run_id, approval_id=approval_id, decision=decision, stdout=sys.stdout))

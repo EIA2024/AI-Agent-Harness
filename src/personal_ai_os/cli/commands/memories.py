@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 import sys
 from typing import TextIO
@@ -10,6 +9,7 @@ from typing import TextIO
 import typer
 
 from personal_ai_os.cli.bootstrap import build_client
+from personal_ai_os.cli.commands.run_helper import run_admin
 from personal_ai_os.cli.commands.table_output import emit, short_id
 
 app = typer.Typer(help="Manage memories")
@@ -34,7 +34,7 @@ async def _list_memories(*, json_mode: bool, stdout: TextIO) -> None:
 @app.command("list")
 def memories_list(json: bool = typer.Option(False, "--json", help="JSON output")) -> None:
     """List memories."""
-    asyncio.run(_list_memories(json_mode=json, stdout=sys.stdout))
+    run_admin(lambda: _list_memories(json_mode=json, stdout=sys.stdout))
 
 
 async def _search_memories(query: str, limit: int, *, json_mode: bool, stdout: TextIO) -> None:
@@ -53,7 +53,7 @@ def memories_search(
     json: bool = typer.Option(False, "--json", help="JSON output"),
 ) -> None:
     """Search memories."""
-    asyncio.run(_search_memories(query, limit, json_mode=json, stdout=sys.stdout))
+    run_admin(lambda: _search_memories(query, limit, json_mode=json, stdout=sys.stdout))
 
 
 async def _show_memory(memory_id: str, *, stdout: TextIO) -> None:
@@ -65,7 +65,7 @@ async def _show_memory(memory_id: str, *, stdout: TextIO) -> None:
 @app.command("show")
 def memories_show(memory_id: str) -> None:
     """Show a memory's full detail (incl. provenance)."""
-    asyncio.run(_show_memory(memory_id, stdout=sys.stdout))
+    run_admin(lambda: _show_memory(memory_id, stdout=sys.stdout))
 
 
 async def _forget(memory_id: str, *, yes: bool, stdout: TextIO, stderr: TextIO) -> None:
@@ -83,4 +83,4 @@ def memories_forget(
     yes: bool = typer.Option(False, "--yes", help="Confirm the destructive action"),
 ) -> None:
     """Forget (soft-delete) a memory. Requires --yes."""
-    asyncio.run(_forget(memory_id, yes=yes, stdout=sys.stdout, stderr=sys.stderr))
+    run_admin(lambda: _forget(memory_id, yes=yes, stdout=sys.stdout, stderr=sys.stderr))

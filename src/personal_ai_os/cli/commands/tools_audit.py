@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 import sys
 from typing import TextIO
@@ -10,6 +9,7 @@ from typing import TextIO
 import typer
 
 from personal_ai_os.cli.bootstrap import build_client
+from personal_ai_os.cli.commands.run_helper import run_admin
 from personal_ai_os.cli.commands.table_output import emit, short_id
 
 tools_app = typer.Typer(help="List registered tools")
@@ -39,7 +39,7 @@ async def _list_tools(*, json_mode: bool, stdout: TextIO) -> None:
 @tools_app.command("list")
 def tools_list(json: bool = typer.Option(False, "--json", help="JSON output")) -> None:
     """List tools registered with the server."""
-    asyncio.run(_list_tools(json_mode=json, stdout=sys.stdout))
+    run_admin(lambda: _list_tools(json_mode=json, stdout=sys.stdout))
 
 
 async def _list_audit(limit: int, *, json_mode: bool, stdout: TextIO) -> None:
@@ -68,4 +68,4 @@ def audit_list(
     json: bool = typer.Option(False, "--json", help="JSON output"),
 ) -> None:
     """List recent audit log entries."""
-    asyncio.run(_list_audit(limit, json_mode=json, stdout=sys.stdout))
+    run_admin(lambda: _list_audit(limit, json_mode=json, stdout=sys.stdout))
