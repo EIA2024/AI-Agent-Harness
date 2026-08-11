@@ -21,7 +21,7 @@
 | Web | FastAPI + uvicorn + sse-starlette |
 | Agent 状态机 | LangGraph 1.2（StateGraph + interrupt/Command 实现 HITL） |
 | ORM/DB | SQLAlchemy 2 async + aiosqlite（测试/dev）/ asyncpg + PostgreSQL 16 + pgvector（生产） |
-| LLM | Anthropic Messages API（provider adapter）；无 Key 时回退 EchoProvider（demo 模式） |
+| LLM | Anthropic Messages API（provider adapter）+ **OpenAI 兼容 `/chat/completions`（OpenAI/DeepSeek/Kimi/GLM/Qwen/Ollama）**；无 Key 时回退 EchoProvider（demo 模式） |
 | 工具调用 | httpx、ast（安全表达式求值） |
 | 测试 | pytest + pytest-asyncio；ruff 静态检查 |
 
@@ -134,9 +134,11 @@ LangGraph 状态机，节点：`intake → build_context → decide → (plan|to
 
 ### 4.7 Model Gateway（`model_gateway/`）
 - **AnthropicProvider**：真实 Messages API 适配（system 提取、tool_use/tool_result 转换、cache 与 cost 解析、上游错误统一 → ModelError）
-- **ModelRouter**：purpose→role（router/worker/vision/embedding）→ 配置模型选择；failover 上限 2 个 provider
+- **OpenAICompatibleProvider**：`httpx` 调用 `{base_url}/chat/completions`，兼容 OpenAI/DeepSeek/Moonshot/GLM/Qwen/Ollama；原生 tool_calls 解析、错误统一 → ModelError
+- **ProviderConfigStore**（`model_gateway/config.py`）：多套 LLM Profile（format/base_url/api_key/model）持久化到 **`~/.personal_ai/profiles.json`（仓库外，密钥不进 git）**；add/list/use/edit/remove/set_active + masked_key；`PERSONAL_AI_CONFIG_DIR` 可覆盖路径
+- **ModelRouter**：purpose→role（router/worker/vision/embedding）→ 配置模型选择；failover 上限 2 个 provider；有 active profile 时按 profile 的单一模型路由
 - **FakeProvider / EchoProvider**：测试脚本化 / 无 Key demo
-- **cost**：per-model 定价表估算（input/cached/output）
+- **cost**：per-model 定价表估算（input/cached/output）；OpenAI 兼容类 cost 留给预算层
 
 ### 4.8 API 层（`apps/api/`）
 - **create_app(services) DI 工厂**：测试注入 mock，不触发真实模块
@@ -224,7 +226,7 @@ users, agents, external_identities, projects, sessions, messages, runs, run_step
 ## 9. 已知局限与遗留工作（非 MVP 阻塞）
 
 1. **Scheduler 执行**：automations CRUD 已实现，`run` 端点返回 501（需接 Scheduler/Temporal）
-2. **Memory embedding**：MVP 用确定性哈希向量；生产应接真实 embedding model（接口已抽象）
+2. **Memory embedding**：MVP 用确定性哈希向量；生产应接真实 embedding model（接口已抽象）。**注意**：切换嵌入模型时不同模型的向量空间不兼容，需对存量记忆重嵌入（行业共识，详见 README 引用）；切换聊天 API（OpenAI/Anthropic/DeepSeek）则**记忆完全共享、不受影响**（记忆存本地 DB，与 LLM 厂商无关）
 3. **http_fetch DNS rebinding**：SSRF 检查有 TOCTOU 窗口，生产需网络级 allowlist
 4. **Web 前端**：`apps/web` 未实现（当前 API + CLI + SSE 可用）
 5. **Redis/队列**：多 Worker / 事件重放时引入 Redis Streams
