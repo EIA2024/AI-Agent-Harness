@@ -28,12 +28,12 @@ class _PlainSink:
         pass
 
 
-async def run_plain(client: AsyncAPIClient) -> None:
+async def run_plain(client: AsyncAPIClient, *, session_id: str | None = None) -> None:
     """Non-TTY interactive loop: plain transcript lines + ``input()``."""
     from personal_ai_os.cli.tui.controllers.chat import ChatController
 
     sink = _PlainSink()
-    controller = ChatController(client, sink)
+    controller = ChatController(client, sink, session_id=session_id)
     sink.state = controller.state
     print("Personal AI — plain mode (type Ctrl+C to exit).", file=sys.stderr)
     while True:
@@ -43,6 +43,9 @@ async def run_plain(client: AsyncAPIClient) -> None:
             print(file=sys.stderr)
             break
         if not prompt.strip():
+            continue
+        if prompt.strip().startswith("/"):
+            print(f"/ command not supported in plain mode: {prompt.strip()}", file=sys.stderr)
             continue
         await controller.send(prompt.strip())
         while controller.busy:
@@ -58,7 +61,12 @@ def _read_prompt() -> str:
     return input("> ")
 
 
-def run_app(client: AsyncAPIClient | None = None, *, force_plain: bool = False) -> None:
+def run_app(
+    client: AsyncAPIClient | None = None,
+    *,
+    session_id: str | None = None,
+    force_plain: bool = False,
+) -> None:
     """Run the interactive UI, choosing Textual or plain by capability."""
     from personal_ai_os.cli.bootstrap import build_client
 
@@ -68,11 +76,11 @@ def run_app(client: AsyncAPIClient | None = None, *, force_plain: bool = False) 
 
     try:
         if force_plain or not (is_tty(sys.stdout) and color_enabled(sys.stdout)):
-            asyncio.run(run_plain(client))
+            asyncio.run(run_plain(client, session_id=session_id))
         else:
             from personal_ai_os.cli.tui.app import PersonalAIApp
 
-            PersonalAIApp(client=client).run()
+            PersonalAIApp(client=client, session_id=session_id).run()
     finally:
         if owns_client:
             asyncio.run(client.aclose())

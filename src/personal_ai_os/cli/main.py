@@ -38,21 +38,71 @@ app = typer.Typer(
 
 
 @app.callback()
-def _root(ctx: typer.Context) -> None:
+def _root(
+    ctx: typer.Context,
+    continue_session: bool = typer.Option(
+        False, "--continue", help="Resume the most recent session"
+    ),
+    session: str | None = typer.Option(
+        None, "--session", help="Resume a specific session id"
+    ),
+    pick: bool = typer.Option(
+        False, "--pick", help="Choose a session to resume interactively"
+    ),
+) -> None:
     """With no subcommand, enter the interactive UI (TTY only)."""
     if ctx.invoked_subcommand is None:
         if sys.stdin.isatty() and sys.stdout.isatty():
-            _interactive()
+            session_id = _resolve_session(session, continue_session=continue_session, pick=pick)
+            from personal_ai_os.cli.tui import run_app
+
+            run_app(session_id=session_id)
         else:
             typer.echo(ctx.get_help())
             raise typer.Exit(code=0)
 
 
-def _interactive() -> None:
-    """Interactive UI: Textual TUI with a plain non-TTY fallback."""
-    from personal_ai_os.cli.tui import run_app
+def _resolve_session(
+    explicit: str | None, *, continue_session: bool, pick: bool
+) -> str | None:
+    """Resolve the session to resume: explicit id > --continue > --pick."""
+    if explicit:
+        return explicit
+    if not (continue_session or pick):
+        return None
+    import asyncio
 
-    run_app()
+    from personal_ai_os.cli.bootstrap import build_client
+
+    async def _list() -> list[dict]:
+        async with build_client() as client:
+            sessions = await client.list_sessions(status="active", limit=20)
+        return [
+            {
+                "id": s.id,
+                "title": s.title,
+                "status": s.status,
+                "updated": s.last_active_at or "",
+            }
+            for s in sessions
+        ]
+
+    sessions = asyncio.run(_list())
+    if not sessions:
+        typer.echo("no sessions to resume", err=True)
+        return None
+    if continue_session:
+        return sessions[0]["id"]
+    # interactive picker (TTY)
+    typer.echo("Sessions:")
+    for i, s in enumerate(sessions, 1):
+        title = (s["title"] or "")[:40]
+        typer.echo(f"  {i}. {s['id'][:8]}  {title}")
+    choice = typer.prompt("Pick a session (number)", type=int, default=1)
+    if 1 <= choice <= len(sessions):
+        return sessions[choice - 1]["id"]
+    typer.echo("invalid choice", err=True)
+    return None
 
 
 # ---------------------------------------------------------------------------
