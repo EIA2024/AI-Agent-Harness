@@ -64,6 +64,21 @@ def _tool_call_id(pending) -> str | None:  # noqa: ANN001
         return pending.get("id") or pending.get("tool_call_id")
     return None
 
+
+def _tool_call_name(pending) -> str:  # noqa: ANN001
+    if isinstance(pending, dict):
+        function = pending.get("function") if isinstance(pending.get("function"), dict) else {}
+        return str(function.get("name") or pending.get("name") or "")
+    return ""
+
+
+class ToolArgumentParseError(ValueError):
+    """The LLM emitted an invalid ``arguments`` JSON for a tool call.
+
+    P1-031: this must surface as a failed tool result — never be silently
+    replaced with ``{}`` and executed.
+    """
+
 logger = logging.getLogger(__name__)
 
 #: Unbounded-autonomous-loop guard — maximum tool calls a single run may make
@@ -204,9 +219,14 @@ async def _model_call(deps: _Deps, state: dict, request: ModelRequest) -> ModelR
 
 
 def _extract_tool_call_fields(pending: Any) -> tuple[str, dict]:
-    """Parse ``{name, arguments}`` out of an LLM-style tool-call dict."""
+    """Parse ``{name, arguments}`` out of an LLM-style tool-call dict.
+
+    Raises :class:`ToolArgumentParseError` when ``arguments`` is not valid JSON
+    (P1-031) — the caller must surface that as a failed tool result instead of
+    executing with ``{}``.
+    """
     if not isinstance(pending, dict):
-        return "", {}
+        raise ToolArgumentParseError("malformed tool call (not an object)")
     function = pending.get("function") if isinstance(pending.get("function"), dict) else {}
     name = function.get("name") or pending.get("name") or ""
     raw_args = function.get("arguments") or pending.get("arguments") or "{}"
@@ -215,10 +235,14 @@ def _extract_tool_call_fields(pending: Any) -> tuple[str, dict]:
     else:
         try:
             arguments = json.loads(raw_args or "{}")
-        except Exception:
-            arguments = {}
+        except Exception as exc:
+            raise ToolArgumentParseError(
+                f"invalid tool arguments JSON: {str(raw_args)[:120]!r}"
+            ) from exc
     if not isinstance(arguments, dict):
-        arguments = {}
+        raise ToolArgumentParseError(
+            f"tool arguments must be a JSON object, got: {str(raw_args)[:120]!r}"
+        )
     return str(name), arguments
 
 
@@ -341,12 +365,26 @@ def _serialize_rejection(name: str, pending: Any, reason: str,
 
 
 async def intake(state: AgentState, deps: _Deps) -> dict:
-    """Initialize run identity and classify the task level."""
+    """Initialize run identity and classify the task level.
+
+    P1-032: identity fields are required — fail fast instead of fabricating
+    random UUIDs that would silently break persistence / audit scoping.
+    """
+    run_id = state.get("run_id")
+    owner_id = state.get("owner_id")
+    session_id = state.get("session_id")
+    missing = [
+        key
+        for key, value in (("run_id", run_id), ("owner_id", owner_id), ("session_id", session_id))
+        if not value
+    ]
+    if missing:
+        raise ValueError(f"run state missing required identity fields: {missing}")
     task = await deps.classifier.classify(state.get("user_input", ""))
     return {
-        "run_id": state.get("run_id") or str(uuid.uuid4()),
-        "session_id": state.get("session_id"),
-        "owner_id": state.get("owner_id"),
+        "run_id": run_id,
+        "session_id": session_id,
+        "owner_id": owner_id,
         "agent_id": state.get("agent_id"),
         "status": "intake",
         "task": task,
@@ -470,7 +508,31 @@ async def tool_request(state: AgentState, deps: _Deps) -> dict:
     sit in front of one).
     """
     pending = state.get("pending_tool_call")
-    name, arguments = _extract_tool_call_fields(pending)
+    try:
+        name, arguments = _extract_tool_call_fields(pending)
+    except ToolArgumentParseError as exc:
+        # P1-031: invalid args must never execute with {} — surface the parse
+        # error as a failed tool result so the model sees it and can recover.
+        run_uuid = UUID(str(state.get("run_id") or uuid.uuid4()))
+        return {
+            "status": "executing_tool",
+            "pending_tool_call": None,
+            "pending_approval": None,
+            "tool_results": list(state.get("tool_results") or [])
+            + [
+                {
+                    "id": str(uuid.uuid4()),
+                    "tool_name": _tool_call_name(pending),
+                    "tool_call_id": _tool_call_id(pending),
+                    "tool_call": pending,
+                    "success": False,
+                    "error": f"{exc} [TOOL_ARGUMENT_PARSE_ERROR]",
+                    "error_code": "TOOL_ARGUMENT_PARSE_ERROR",
+                    "arguments": {},
+                }
+            ],
+            "_cached_context": None,  # P0-001: tool_results changed
+        }
     run_uuid = UUID(str(state.get("run_id") or uuid.uuid4()))
     owner_uuid = UUID(str(state.get("owner_id") or uuid.uuid4()))
     session_uuid = UUID(str(state["session_id"])) if state.get("session_id") else None

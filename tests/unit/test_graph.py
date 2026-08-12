@@ -2,6 +2,7 @@
 
 import uuid
 
+import pytest
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.types import Command
 
@@ -282,3 +283,44 @@ def test_tool_message_content_without_data():
 
     assert _tool_message_content({"text": "ok"}) == "ok"
     assert _tool_message_content({"error": "boom"}) == "boom"
+
+
+async def test_invalid_tool_args_are_not_executed():
+    """P1-031 — bad arguments JSON must fail loudly, never execute with {}."""
+    bad_tool_call = {
+        "type": "function",
+        "id": "call-bad",
+        "function": {"name": "search", "arguments": "{bad json"},
+    }
+    compiled, provider, broker = build_compiled(
+        [
+            {"content": None, "tool_calls": [bad_tool_call]},
+            {"content": "收到错误", "tool_calls": None},
+        ]
+    )
+    initial = make_initial("查一下")
+    result = await compiled.ainvoke(initial, cfg(initial["run_id"]))
+
+    assert len(broker.calls) == 0  # the connector was NEVER invoked
+    failed = [t for t in result["tool_results"] if t.get("error_code") == "TOOL_ARGUMENT_PARSE_ERROR"]
+    assert failed
+    # observe folded the parse error into the transcript the model will see
+    assert "TOOL_ARGUMENT_PARSE_ERROR" in str(result["messages"])
+
+
+async def test_missing_owner_id_fails_fast():
+    """P1-032 — a run without identity must fail before any tool executes."""
+    compiled, _provider, _broker = build_compiled([{"content": "hi"}])
+    initial = make_initial("hi")
+    del initial["owner_id"]
+    with pytest.raises(ValueError, match="owner_id"):
+        await compiled.ainvoke(initial, cfg(initial["run_id"]))
+
+
+async def test_missing_run_id_fails_fast():
+    """P1-032 — no fabricated UUIDs for a missing run id."""
+    compiled, _provider, _broker = build_compiled([{"content": "hi"}])
+    initial = make_initial("hi")
+    del initial["run_id"]
+    with pytest.raises(ValueError, match="run_id"):
+        await compiled.ainvoke(initial, cfg(uuid.uuid4()))
