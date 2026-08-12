@@ -28,10 +28,14 @@ from personal_ai_os.cli.tui.widgets.status_bar import StatusBar
 from personal_ai_os.cli.tui.widgets.transcript import Transcript
 
 _CSS = """
+Screen { layout: vertical; }
 #transcript {
+    height: auto;
+    padding: 0 1;
+}
+#scroll {
     height: 1fr;
     border-bottom: solid $border;
-    padding: 0 1;
 }
 #composer {
     height: auto;

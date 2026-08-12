@@ -123,3 +123,42 @@ async def test_ctrl_c_cancels_active_run():
         await pilot.press("ctrl+c")
         await pilot.pause()
         assert client.cancelled == "r1"
+
+
+class _LongConversationClient(FakeClient):
+    """Replays a body with 200 assistant lines."""
+
+    def __init__(self) -> None:
+        body = (
+            "event: run.started\n"
+            'data: {"run_id": "r1"}\n'
+            "\n"
+        )
+        for i in range(200):
+            body += f"event: text.delta\ndata: {{\"text\": \"line {i}\\n\"}}\n\n"
+        body += "event: run.completed\n"
+        body += 'data: {"run_id": "r1", "status": "completed"}\n\n'
+        super().__init__(body)
+
+
+async def test_long_conversation_is_scrollable():
+    """Bugfix: a transcript taller than the viewport must scroll (not clip)."""
+    app = PersonalAIApp(client=_LongConversationClient())
+    async with app.run_test(size=(100, 30)) as pilot:
+        composer = app.query_one("#composer", Composer)
+        composer.text = "long prompt"
+        await pilot.press("enter")
+        await _wait_idle(app, pilot)
+        await pilot.pause()
+
+        scroll = app.query_one("#scroll")
+        assert scroll.max_scroll_y > 0, "container must be scrollable"
+        # view is pinned to the latest lines after the run completes
+        assert scroll.scroll_offset.y >= scroll.max_scroll_y - 1
+
+        # scrolling up to read history stays put (stick-to-bottom)
+        scroll.scroll_to(y=0, animate=False)
+        await pilot.pause()
+        app.query_one("#transcript", Transcript).render_state(app.controller.state)
+        await pilot.pause()
+        assert scroll.scroll_offset.y == 0
