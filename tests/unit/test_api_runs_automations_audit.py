@@ -240,3 +240,31 @@ async def test_audit_list(make_api, db):
         # other user sees nothing
         other = await ac.get("/v1/audit", headers={"X-API-Key": "other-key"})
         assert other.json() == []
+
+
+@pytest.mark.asyncio
+async def test_automation_run_501_does_not_touch_last_run_at(make_api):
+    """P1-034 — a 501 stub must not record a run attempt."""
+    await _ensure_auto_user()
+    from sqlalchemy import select
+
+    from personal_ai_os.db.models import Automation
+
+    async with make_api(services=ServiceContainer()) as ac:
+        created = await ac.post(
+            "/v1/automations",
+            json={
+                "name": "Unwired",
+                "trigger_type": "cron",
+                "trigger_config": {"cron": "0 8 * * *"},
+                "prompt": "do something",
+            },
+            headers={"X-API-Key": _AUTO_KEY},
+        )
+        auto_id = created.json()["id"]
+        ran = await ac.post(f"/v1/automations/{auto_id}/run", headers={"X-API-Key": _AUTO_KEY})
+        assert ran.status_code == 501
+        async with session_scope() as s:
+            row = (await s.execute(select(Automation).where(Automation.id == uuid.UUID(auto_id)))).scalars().first()
+            assert row is not None
+            assert row.last_run_at is None

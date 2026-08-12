@@ -471,6 +471,9 @@ class RunRunner:
                 await self._handle_approval_interrupt(run_uuid, interrupt_payload)
             else:
                 await self._finalize(run_uuid, success=True)
+                # P1-028: resume completion runs the SAME compaction pipeline as
+                # a fresh run's completion — never skip session-memory compaction.
+                await self._compact_session_memory(run_uuid)
             return await self.get_run(run_uuid)
         except Exception as exc:
             await self._fail(run_uuid, exc)

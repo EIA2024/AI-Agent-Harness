@@ -11,7 +11,7 @@ import os
 import sys
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 
 from personal_ai_os.db import session as db_session
@@ -89,7 +89,34 @@ def _warn_insecure_config() -> None:
 
 
 def healthz() -> dict:
+    """Liveness: the process is up (not a readiness check, P1-023)."""
     return {"status": "ok", "service": "personal-ai-os-api"}
+
+
+async def readyz(request: Request) -> dict:
+    """Readiness: the process can actually serve — DB, runner, registry, auth."""
+    import logging
+
+    from personal_ai_os.db.session import session_scope
+
+    logger = logging.getLogger("personal_ai_os.ready")
+    container = request.app.state.services
+    checks: dict[str, bool] = {}
+    try:
+        async with session_scope() as s:
+            from sqlalchemy import text
+
+            await s.execute(text("SELECT 1"))
+        checks["database"] = True
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("readyz database check failed: %s", exc)
+        checks["database"] = False
+
+    checks["runner"] = container.runner is not None
+    checks["tool_registry"] = container.tool_registry is not None
+    checks["model_provider"] = container.model_provider is not None
+    ready = all(checks.values())
+    return {"status": "ready" if ready else "not_ready", "checks": checks}
 
 
 def create_app(services: ServiceContainer | None = None) -> FastAPI:
@@ -103,13 +130,34 @@ def create_app(services: ServiceContainer | None = None) -> FastAPI:
     )
     app.state.services = container
 
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=["*"],
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
-    )
+    # P1-022: CORS is OFF by default. Enable only an explicit allowlist via
+    # PERSONAL_AI_CORS_ORIGINS (comma-separated); credentials are only sent when
+    # an explicit origin (not "*") is allowed.
+    cors_origins = [
+        o.strip()
+        for o in os.environ.get("PERSONAL_AI_CORS_ORIGINS", "").split(",")
+        if o.strip()
+    ]
+    if cors_origins:
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=cors_origins,
+            allow_credentials=True,
+            allow_methods=["*"],
+            allow_headers=["*"],
+        )
+
+    # P1-026: reject oversized request bodies up front (413).
+    _MAX_REQUEST_BODY = int(os.environ.get("PERSONAL_AI_MAX_BODY_BYTES", "2_000_000"))
+
+    @app.middleware("http")
+    async def _limit_body_size(request: Request, call_next):  # noqa: ANN001
+        length = request.headers.get("content-length")
+        if length and length.isdigit() and int(length) > _MAX_REQUEST_BODY:
+            from fastapi.responses import JSONResponse
+
+            return JSONResponse(status_code=413, content={"detail": "request body too large"})
+        return await call_next(request)
 
     app.include_router(sessions.router)
     app.include_router(messages.router)
@@ -122,6 +170,7 @@ def create_app(services: ServiceContainer | None = None) -> FastAPI:
     app.include_router(audit.router)
 
     app.add_api_route("/healthz", healthz, methods=["GET"], tags=["system"])
+    app.add_api_route("/readyz", readyz, methods=["GET"], tags=["system"])
 
     _register_approval_error_handlers(app)
 
@@ -136,7 +185,6 @@ def _register_approval_error_handlers(app: FastAPI) -> None:
     into a fake success. Expired → 410, double-resolve → 409, missing → 404,
     bad decision → 422.
     """
-    from fastapi import Request
     from fastapi.responses import JSONResponse
 
     from personal_ai_os.policy_engine.approval import (
