@@ -91,7 +91,44 @@ def create_app(services: ServiceContainer | None = None) -> FastAPI:
 
     app.add_api_route("/healthz", healthz, methods=["GET"], tags=["system"])
 
+    _register_approval_error_handlers(app)
+
     return app
+
+
+def _register_approval_error_handlers(app: FastAPI) -> None:
+    """Map typed ApprovalEngine failures to HTTP statuses (P0-004).
+
+    Without these the API would let an approval-resolution failure (expired,
+    double-resolve, missing) escape as an opaque 500 — or, worse, be swallowed
+    into a fake success. Expired → 410, double-resolve → 409, missing → 404,
+    bad decision → 422.
+    """
+    from fastapi import Request
+    from fastapi.responses import JSONResponse
+
+    from personal_ai_os.policy_engine.approval import (
+        ApprovalExpiredError,
+        ApprovalInvalidDecisionError,
+        ApprovalNotFoundError,
+        ApprovalNotPendingError,
+    )
+
+    @app.exception_handler(ApprovalNotFoundError)
+    async def _not_found(request: Request, exc: ApprovalNotFoundError) -> JSONResponse:
+        return JSONResponse(status_code=404, content={"detail": str(exc)})
+
+    @app.exception_handler(ApprovalNotPendingError)
+    async def _not_pending(request: Request, exc: ApprovalNotPendingError) -> JSONResponse:
+        return JSONResponse(status_code=409, content={"detail": str(exc)})
+
+    @app.exception_handler(ApprovalExpiredError)
+    async def _expired(request: Request, exc: ApprovalExpiredError) -> JSONResponse:
+        return JSONResponse(status_code=410, content={"detail": str(exc)})
+
+    @app.exception_handler(ApprovalInvalidDecisionError)
+    async def _invalid_decision(request: Request, exc: ApprovalInvalidDecisionError) -> JSONResponse:
+        return JSONResponse(status_code=422, content={"detail": str(exc)})
 
 
 def run() -> None:

@@ -7,10 +7,12 @@ real ApprovalEngine. These tests pin the fixed behavior end-to-end.
 from __future__ import annotations
 
 import asyncio
+import uuid
+from datetime import UTC
 
 import pytest
 
-from personal_ai_os.cli.api.errors import ConflictError
+from personal_ai_os.cli.api.errors import APIError, ConflictError
 from tests.integration.cli.conftest import _tool_call
 
 
@@ -112,3 +114,38 @@ async def test_reject_resume_completes(cli_client):
         await client.reject(approval["id"])
         await client.resume_run(send.run_id, approval_id=approval["id"], decision="rejected")
         await _wait_terminal(client, send.run_id)
+
+
+@pytest.mark.asyncio
+async def test_expired_approval_fails_closed_not_fake_success(cli_client):
+    """P0-004 — a non-idempotent resolve failure (expired) must NOT be swallowed
+    into a fake success; the request fails loudly and the tool never runs."""
+    from datetime import datetime, timedelta
+
+    from sqlalchemy import update
+
+    from personal_ai_os.db.models import Approval
+    from personal_ai_os.db.session import session_scope
+
+    script = [
+        {"tool_calls": _tool_call("mail.send", {"to": "a@x.com", "subject": "s", "body": "b"})},
+        {"content": "sent"},
+    ]
+    async with cli_client(script) as client:
+        session = await client.create_session(channel="cli")
+        send = await client.send_message(session.id, "email")
+        approval = await _wait_approval(client, send.run_id)
+
+        # expire the pending approval in the DB
+        async with session_scope() as s:
+            await s.execute(
+                update(Approval)
+                .where(Approval.id == uuid.UUID(approval["id"]))
+                .values(expires_at=datetime.now(UTC) - timedelta(seconds=1))
+            )
+
+        with pytest.raises(APIError):  # expired → fail closed, never fake success
+            await client.approve(approval["id"])
+        # and the run stays waiting — the tool was NOT executed
+        run = await client.get_run(send.run_id)
+        assert run.status == "waiting_approval"

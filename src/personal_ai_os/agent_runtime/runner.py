@@ -38,6 +38,7 @@ from personal_ai_os.common.utils import approximate_tokens
 from personal_ai_os.context_engine.summarizer import ConversationSummarizer
 from personal_ai_os.db.models import Approval, Message, Run, RunStep, Session, ToolCall
 from personal_ai_os.db.session import session_scope
+from personal_ai_os.policy_engine.approval import ApprovalNotPendingError
 
 _MAX_TOOL_RESULTS_PERSISTED = 50
 
@@ -398,11 +399,12 @@ class RunRunner:
                 await self.approval_engine.resolve(
                     approval_id, decision=decision, approved_by=approved_by, edited_arguments=edited_arguments
                 )
-            except Exception:
-                # The approval may already have been resolved (e.g. the CLI
-                # posted the decision via /v1/approvals/*/approve first, or a
-                # concurrent resume won). Resume must not 500 on that — the
-                # graph continues from the recorded decision below.
+            except ApprovalNotPendingError:
+                # The approval was already resolved (CLI posted the decision via
+                # /v1/approvals/*/approve first, or a concurrent resume won).
+                # P0-004: this is the ONLY idempotent case tolerated; any other
+                # resolve failure (expired, DB error, wrong state) must fail the
+                # resume loudly instead of pretending success.
                 pass
         elif approval_id is not None:
             async with session_scope() as session:

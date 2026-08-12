@@ -26,6 +26,29 @@ _RESOLVE_STATUS = {
 }
 
 
+class ApprovalError(Exception):
+    """Base for approval-resolution failures (P0-004: typed, not ValueError)."""
+
+
+class ApprovalNotFoundError(ApprovalError):
+    """The approval row does not exist."""
+
+
+class ApprovalNotPendingError(ApprovalError):
+    """The approval was already resolved (double approve / concurrent resume).
+
+    This is the ONLY error callers may treat as idempotent.
+    """
+
+
+class ApprovalExpiredError(ApprovalError):
+    """The approval expired before it could be resolved."""
+
+
+class ApprovalInvalidDecisionError(ApprovalError):
+    """Unknown decision string passed to resolve()."""
+
+
 class ApprovalEngine:
     """Create, resolve and verify human-in-the-loop approvals."""
 
@@ -90,20 +113,29 @@ class ApprovalEngine:
         approved_by: UUID,
         edited_arguments: dict | None = None,
     ) -> ApprovalReceipt:
-        """Resolve a pending approval and produce an :class:`ApprovalReceipt`."""
+        """Resolve a pending approval and produce an :class:`ApprovalReceipt`.
+
+        Raises :class:`ApprovalError` subtypes on failure — callers must not
+        swallow exceptions here (P0-004); only :class:`ApprovalNotPendingError`
+        is safe to treat as an idempotent double-resolve.
+        """
         if decision not in _RESOLVE_STATUS:
-            raise ValueError(f"Unknown approval decision: {decision!r}")
+            raise ApprovalInvalidDecisionError(f"Unknown approval decision: {decision!r}")
 
         async with session_scope() as session:
             row = await session.get(Approval, approval_id)
             if row is None:
-                raise ValueError(f"Approval {approval_id} not found")
+                raise ApprovalNotFoundError(f"Approval {approval_id} not found")
             if row.status != "pending":
-                raise ValueError(f"Approval {approval_id} already {row.status}")
+                # A reader may have auto-expired the row; distinguish "expired"
+                # from a genuine double-resolve so callers can map 410 vs 409.
+                if row.status == "expired":
+                    raise ApprovalExpiredError(f"Approval {approval_id} has expired")
+                raise ApprovalNotPendingError(f"Approval {approval_id} already {row.status}")
             if row.expires_at is not None and utc_now() > ensure_aware(row.expires_at):
                 row.status = "expired"
                 await session.flush()
-                raise ValueError(f"Approval {approval_id} has expired")
+                raise ApprovalExpiredError(f"Approval {approval_id} has expired")
 
             row.status = _RESOLVE_STATUS[decision]
             row.approved_by = approved_by

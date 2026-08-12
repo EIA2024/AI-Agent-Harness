@@ -9,6 +9,7 @@ from sqlalchemy import select
 
 from personal_ai_os.db.models import Approval
 from personal_ai_os.db.session import session_scope
+from personal_ai_os.policy_engine.approval import ApprovalNotPendingError
 
 from ..deps import get_services, resolve_user
 from ..schemas import ApprovalEditBody
@@ -78,11 +79,11 @@ async def _resolve(
                 approved_by=user.id,
                 edited_arguments=edited_arguments,
             )
-        except Exception:
-            # Engine may already have resolved this (idempotent resume).
-            # The direct DB update below is the source of truth for the API
-            # response; the engine's side effects (receipt, hash binding)
-            # are best-effort.
+        except ApprovalNotPendingError:
+            # A concurrent request resolved it between our pending check and the
+            # engine; the read-back below reflects the final state. P0-004: this
+            # is the ONLY tolerated engine error — anything else (expired, DB
+            # failure) must propagate and fail the request closed.
             pass
 
     # Read back the final state: the real engine already set it; a fake engine

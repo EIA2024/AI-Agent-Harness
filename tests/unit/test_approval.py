@@ -9,6 +9,12 @@ import pytest
 
 from personal_ai_os.common.utils import argument_hash
 from personal_ai_os.policy_engine import ApprovalEngine
+from personal_ai_os.policy_engine.approval import (
+    ApprovalExpiredError,
+    ApprovalInvalidDecisionError,
+    ApprovalNotFoundError,
+    ApprovalNotPendingError,
+)
 
 ARGS = {"to": "external@x.com", "subject": "hello"}
 
@@ -129,23 +135,23 @@ async def test_expired_request_auto_expires_and_cannot_resolve(engine, make_requ
     fetched = await engine.get_request(request.id)
     assert fetched.status == "expired"
 
-    with pytest.raises(ValueError, match="expired"):
+    with pytest.raises(ApprovalExpiredError, match="expired"):
         await engine.resolve(request.id, decision="approved", approved_by=owner_id)
 
 
 async def test_unknown_decision_and_double_resolve(engine, make_request, owner_id):
     request = await engine.create_request(**make_request())
 
-    with pytest.raises(ValueError, match="Unknown approval decision"):
+    with pytest.raises(ApprovalInvalidDecisionError, match="Unknown approval decision"):
         await engine.resolve(request.id, decision="maybe", approved_by=owner_id)
 
     await engine.resolve(request.id, decision="approved", approved_by=owner_id)
-    with pytest.raises(ValueError, match="already approved"):
+    with pytest.raises(ApprovalNotPendingError, match="already approved"):
         await engine.resolve(request.id, decision="approved", approved_by=owner_id)
 
 
 async def test_missing_approval_raises(engine):
-    with pytest.raises(ValueError, match="not found"):
+    with pytest.raises(ApprovalNotFoundError, match="not found"):
         await engine.resolve(uuid4(), decision="approved", approved_by=uuid4())
 
     assert await engine.get_request(uuid4()) is None
