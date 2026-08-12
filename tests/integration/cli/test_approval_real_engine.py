@@ -92,6 +92,9 @@ async def test_resume_with_edits_executes_edited_tool(cli_client):
         run = await client.get_run(send.run_id)
         calls = run.tool_calls
         assert len(calls) == 1
+        # P0-003: the edited call must actually EXECUTE (broker's verify_approval
+        # reads the persisted edited hash) — not just be recorded as args.
+        assert calls[0].status in ("success", "completed"), calls[0].status
         assert calls[0].arguments.get("to") == "edited@x.com"
 
 

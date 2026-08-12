@@ -101,6 +101,19 @@ async def test_approved_with_edits_binds_edited_arguments(engine, make_request, 
     assert await engine.get_status(request.id) == "edited"
 
 
+async def test_edited_approval_persists_bound_hash_for_execution(engine, make_request, owner_id):
+    """P0-003 — resolve() must persist edited args+hash so the execution-time
+    guard (verify_approval) accepts the edited call and rejects the original."""
+    request = await engine.create_request(**make_request())
+    edited = {"to": "edited@x.com", "subject": "edited"}
+    await engine.resolve(
+        request.id, decision="approved_with_edits", approved_by=owner_id, edited_arguments=edited
+    )
+    # DB-backed execution guard reads the persisted row
+    assert await engine.verify_approval(request.id, "email.send", edited) is True
+    assert await engine.verify_approval(request.id, "email.send", dict(ARGS)) is False
+
+
 async def test_reject_sets_status_and_receipt_is_not_verifiable(engine, make_request, owner_id):
     request = await engine.create_request(**make_request())
     receipt = await engine.resolve(request.id, decision="rejected", approved_by=owner_id)

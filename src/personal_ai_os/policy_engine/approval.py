@@ -110,6 +110,12 @@ class ApprovalEngine:
 
             bound_args = edited_arguments if edited_arguments is not None else row.arguments_preview or {}
             bound_hash = compute_argument_hash(bound_args)
+            # P0-003: persist the bound values in the SAME transaction, otherwise
+            # verify_approval() later reads the original hash and rejects the
+            # edited execution ("approved A, executed B" — but B was approved).
+            if edited_arguments is not None:
+                row.arguments_preview = edited_arguments
+                row.argument_hash = bound_hash
 
             receipt = ApprovalReceipt(
                 id=uuid4(),
