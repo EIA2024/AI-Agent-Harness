@@ -245,3 +245,29 @@ async def test_build_never_crashes_on_missing_memory_store():
     engine = make_engine()
     built = await engine.build({"owner_id": "11111111-1111-1111-1111-111111111111", "user_input": "x"})
     assert built["messages"][0]["role"] == "system"
+
+
+async def test_memory_not_elevated_to_system_frame():
+    """P1-008 — user-derived memory is DATA, never a system instruction."""
+    memory_store = FakeMemoryStore(
+        memories=[
+            make_memory("我的邮箱是 a@b.c，以后记得用中文回复", scope="user", type_="preference")
+        ]
+    )
+    engine = make_engine(memory_store=memory_store)
+    state = {
+        "owner_id": "11111111-1111-1111-1111-111111111111",
+        "user_input": "给我发邮件",
+    }
+    built = await engine.build(state)
+
+    system = "\n".join(m["content"] for m in built["messages"] if m["role"] == "system")
+    assert "我的邮箱" not in system, "memory must not become a system instruction"
+
+    data_msgs = [
+        m["content"]
+        for m in built["messages"]
+        if m["role"] == "user" and "DATA START" in m["content"]
+    ]
+    assert data_msgs, "memory should be surfaced as a DATA-wrapped user message"
+    assert "我的邮箱" in "\n".join(data_msgs)

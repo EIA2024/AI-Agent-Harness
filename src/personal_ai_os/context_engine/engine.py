@@ -99,13 +99,19 @@ class ContextEngine:
         tool_messages = self._tier4_tool_results(state, budget)
 
         # ---- Assemble -------------------------------------------------------
+        # P1-008: user-derived memory must NOT ride in the system frame (a
+        # memory could contain instructions). It is surfaced as a DATA-wrapped
+        # user message below, same trust treatment as tool/web content.
         system_prompt = "\n\n".join(
-            p for p in (tier1, profile, skills, task_state, memories) if p
+            p for p in (tier1, profile, skills, task_state) if p
         )
 
         messages: list[dict] = [{"role": "system", "content": system_prompt}]
         messages.extend(conversation)
         messages.extend(self._wrap_untrusted_context(state))
+        if memories:
+            pre, suf = untrusted_wrapper("memory")
+            messages.append({"role": "user", "content": f"{pre}\n{memories}{suf}"})
         messages.extend(tool_messages)
         messages.append({"role": "user", "content": state.get("user_input", "")})
 
