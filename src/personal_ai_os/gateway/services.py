@@ -243,8 +243,30 @@ async def complete_wiring(container: ServiceContainer) -> ServiceContainer:
                 policy_engine=container.policy_engine,
                 approval_engine=container.approval_engine,
                 event_bus=container.event_bus,
+                # P0-005: a persistent checkpointer so approval/interrupt state
+                # survives a server restart (never InMemorySaver in production).
+                checkpointer=await _open_persistent_checkpointer(),
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning("Runner wiring failed: %s", exc)
 
     return container
+
+
+async def _open_persistent_checkpointer():
+    """Open a file-backed SQLite checkpointer at the data dir.
+
+    The saver stays open for the process lifetime (LangGraph async saver);
+    its ``__aexit__`` would close the connection, so we enter it explicitly.
+    """
+    from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+
+    data_dir = os.environ.get(
+        "PERSONAL_AI_DATA_DIR", os.path.join(os.path.expanduser("~"), ".personal_ai")
+    )
+    os.makedirs(data_dir, exist_ok=True)
+    path = os.path.join(data_dir, "checkpoints.sqlite")
+    checkpointer_cm = AsyncSqliteSaver.from_conn_string(path)
+    saver = await checkpointer_cm.__aenter__()
+    logger.info("persistent checkpointer: %s", path)
+    return saver

@@ -18,6 +18,7 @@ database.
 from __future__ import annotations
 
 import asyncio
+import logging
 import uuid
 from datetime import UTC, datetime
 from typing import Any
@@ -39,6 +40,8 @@ from personal_ai_os.context_engine.summarizer import ConversationSummarizer
 from personal_ai_os.db.models import Approval, Message, Run, RunStep, Session, ToolCall
 from personal_ai_os.db.session import session_scope
 from personal_ai_os.policy_engine.approval import ApprovalNotPendingError
+
+logger = logging.getLogger(__name__)
 
 _MAX_TOOL_RESULTS_PERSISTED = 50
 
@@ -111,6 +114,14 @@ class RunRunner:
         if hasattr(graph, "astream"):
             self.compiled = graph
         else:
+            if checkpointer is None:
+                # P0-005: in-memory checkpoints are lost on restart (approval /
+                # interrupt state). Production wiring must pass a persistent
+                # checkpointer (see complete_wiring); this is only a test path.
+                logger.warning(
+                    "RunRunner built without a persistent checkpointer — using "
+                    "InMemorySaver (unsafe for production: approvals lost on restart)"
+                )
             self.compiled = graph.compile(checkpointer=checkpointer or InMemorySaver())
 
         # in-memory bookkeeping for persistence dedup (keyed by run id)
