@@ -1,17 +1,11 @@
-"""Approval engine — HITL approval requests, receipts and argument-hash binding.
-
-Security model (dept 04 §4):
-
-* An approval is bound to the *exact* arguments via ``argument_hash``.
-* ``verify()`` is called right before execution: it checks the tool name and
-  re-hashes the actual arguments, so "approved A, executed B" is impossible.
-* Persistence lives in the ``approvals`` table (``db.models.Approval``).
-"""
+"""Approval engine — HITL requests, atomic resolution and argument binding."""
 
 from __future__ import annotations
 
 from datetime import datetime
 from uuid import UUID, uuid4
+
+from sqlalchemy import select, update
 
 from ..common.models import ApprovalReceipt, ApprovalRequest
 from ..common.utils import argument_hash as compute_argument_hash
@@ -27,32 +21,31 @@ _RESOLVE_STATUS = {
 
 
 class ApprovalError(Exception):
-    """Base for approval-resolution failures (P0-004: typed, not ValueError)."""
+    """Base for approval-resolution failures."""
 
 
 class ApprovalNotFoundError(ApprovalError):
-    """The approval row does not exist."""
+    pass
 
 
 class ApprovalNotPendingError(ApprovalError):
-    """The approval was already resolved (double approve / concurrent resume).
-
-    This is the ONLY error callers may treat as idempotent.
-    """
+    pass
 
 
 class ApprovalExpiredError(ApprovalError):
-    """The approval expired before it could be resolved."""
+    pass
 
 
 class ApprovalInvalidDecisionError(ApprovalError):
-    """Unknown decision string passed to resolve()."""
+    pass
+
+
+class ApprovalAuthMethodRequiredError(ApprovalError):
+    """The request requires a verifier that this service does not provide."""
 
 
 class ApprovalEngine:
     """Create, resolve and verify human-in-the-loop approvals."""
-
-    # -- creation ----------------------------------------------------------
 
     async def create_request(
         self,
@@ -67,9 +60,8 @@ class ApprovalEngine:
         risk_reason: str,
         requires_auth_method: str | None = None,
         expires_at: datetime | None = None,
-        argument_hash: str | None = None,  # noqa: A002 - kw name mirrors common.utils
+        argument_hash: str | None = None,  # noqa: A002
     ) -> ApprovalRequest:
-        """Persist a new pending approval request and return the domain object."""
         hash_value = argument_hash or compute_argument_hash(arguments_preview)
         row = Approval(
             id=uuid4(),
@@ -93,17 +85,18 @@ class ApprovalEngine:
             return _to_request(row)
 
     async def get_request(self, approval_id: UUID) -> ApprovalRequest | None:
-        """Return the approval (auto-expiring it if past ``expires_at``)."""
         async with session_scope() as session:
             row = await session.get(Approval, approval_id)
             if row is None:
                 return None
-            if row.status == "pending" and row.expires_at is not None and utc_now() > ensure_aware(row.expires_at):
+            if (
+                row.status == "pending"
+                and row.expires_at is not None
+                and utc_now() > ensure_aware(row.expires_at)
+            ):
                 row.status = "expired"
                 await session.flush()
             return _to_request(row)
-
-    # -- resolution --------------------------------------------------------
 
     async def resolve(
         self,
@@ -113,43 +106,66 @@ class ApprovalEngine:
         approved_by: UUID,
         edited_arguments: dict | None = None,
     ) -> ApprovalReceipt:
-        """Resolve a pending approval and produce an :class:`ApprovalReceipt`.
+        """Resolve exactly one pending row using an atomic pending->terminal CAS.
 
-        Raises :class:`ApprovalError` subtypes on failure — callers must not
-        swallow exceptions here (P0-004); only :class:`ApprovalNotPendingError`
-        is safe to treat as an idempotent double-resolve.
+        A plain SELECT followed by ORM mutation allowed two concurrent approvers
+        to both observe ``pending``. The conditional UPDATE makes the database
+        pick one winner on both PostgreSQL and SQLite.
         """
         if decision not in _RESOLVE_STATUS:
             raise ApprovalInvalidDecisionError(f"Unknown approval decision: {decision!r}")
 
         async with session_scope() as session:
-            row = await session.get(Approval, approval_id)
+            row = (
+                await session.execute(select(Approval).where(Approval.id == approval_id))
+            ).scalar_one_or_none()
             if row is None:
                 raise ApprovalNotFoundError(f"Approval {approval_id} not found")
             if row.status != "pending":
-                # A reader may have auto-expired the row; distinguish "expired"
-                # from a genuine double-resolve so callers can map 410 vs 409.
                 if row.status == "expired":
                     raise ApprovalExpiredError(f"Approval {approval_id} has expired")
-                raise ApprovalNotPendingError(f"Approval {approval_id} already {row.status}")
+                raise ApprovalNotPendingError(
+                    f"Approval {approval_id} already {row.status}"
+                )
             if row.expires_at is not None and utc_now() > ensure_aware(row.expires_at):
-                row.status = "expired"
-                await session.flush()
                 raise ApprovalExpiredError(f"Approval {approval_id} has expired")
 
-            row.status = _RESOLVE_STATUS[decision]
-            row.approved_by = approved_by
+            # R4 currently declares passkey/step-up requirements, but this codebase
+            # has no verifier. Treat missing security infrastructure as DENY rather
+            # than silently accepting API-key authentication as a substitute.
+            if row.requires_auth_method:
+                raise ApprovalAuthMethodRequiredError(
+                    f"Approval {approval_id} requires {row.requires_auth_method!r}; "
+                    "no verifier is wired, so resolution is refused"
+                )
 
-            bound_args = edited_arguments if edited_arguments is not None else row.arguments_preview or {}
+            bound_args = (
+                edited_arguments
+                if edited_arguments is not None
+                else row.arguments_preview or {}
+            )
             bound_hash = compute_argument_hash(bound_args)
-            # P0-003: persist the bound values in the SAME transaction, otherwise
-            # verify_approval() later reads the original hash and rejects the
-            # edited execution ("approved A, executed B" — but B was approved).
+            values: dict = {
+                "status": _RESOLVE_STATUS[decision],
+                "approved_by": approved_by,
+            }
             if edited_arguments is not None:
-                row.arguments_preview = edited_arguments
-                row.argument_hash = bound_hash
+                values["arguments_preview"] = edited_arguments
+                values["argument_hash"] = bound_hash
 
-            receipt = ApprovalReceipt(
+            result = await session.execute(
+                update(Approval)
+                .where(Approval.id == approval_id, Approval.status == "pending")
+                .values(**values)
+            )
+            if result.rowcount != 1:
+                current = await session.get(Approval, approval_id)
+                status = current.status if current is not None else "missing"
+                raise ApprovalNotPendingError(
+                    f"Approval {approval_id} concurrently resolved as {status}"
+                )
+
+            return ApprovalReceipt(
                 id=uuid4(),
                 approval_id=approval_id,
                 approved_by=approved_by,
@@ -159,17 +175,10 @@ class ApprovalEngine:
                 argument_hash=bound_hash,
                 expires_at=None,
             )
-            await session.flush()
-            return receipt
 
-    # -- verification ------------------------------------------------------
-
-    async def verify(self, receipt: ApprovalReceipt | None, tool_name: str, arguments: dict) -> bool:
-        """Check a receipt before execution: exact tool + exact arguments.
-
-        Returns False if the receipt was rejected, expired, for a different
-        tool, or bound to different arguments.
-        """
+    async def verify(
+        self, receipt: ApprovalReceipt | None, tool_name: str, arguments: dict
+    ) -> bool:
         if receipt is None:
             return False
         if receipt.decision not in ("approved", "approved_with_edits"):
@@ -180,42 +189,32 @@ class ApprovalEngine:
             return False
         return receipt.argument_hash == compute_argument_hash(arguments)
 
-    async def verify_approval(self, approval_id: UUID, tool_name: str, arguments: dict) -> bool:
-        """Load a persisted approval by id and bind-check it against the exact
-        tool + arguments about to execute.
-
-        This is the execution-time guard: an approved request can only execute
-        the exact arguments whose hash was bound at resolution time (preventing
-        "approved A, executed B"). Non-approved statuses always fail closed.
-        """
+    async def verify_approval(
+        self, approval_id: UUID, tool_name: str, arguments: dict
+    ) -> bool:
         async with session_scope() as session:
             row = await session.get(Approval, approval_id)
             if row is None:
                 return False
             if row.status not in ("approved", "edited"):
                 return False
+            if row.requires_auth_method:
+                # There is no step-up verifier in the current system. Even a DB
+                # row manually flipped to approved must not cross the broker edge.
+                return False
             if row.expires_at is not None and utc_now() > ensure_aware(row.expires_at):
                 return False
             if row.tool_name != tool_name:
                 return False
-            if row.argument_hash is None:
-                # No hash bound at creation → bind now from the preview, so a
-                # call is only valid if it matches the original request.
-                return compute_argument_hash(arguments) == compute_argument_hash(row.arguments_preview or {})
-            return compute_argument_hash(arguments) == row.argument_hash
-
-    # -- status helpers ----------------------------------------------------
+            expected = row.argument_hash or compute_argument_hash(
+                row.arguments_preview or {}
+            )
+            return compute_argument_hash(arguments) == expected
 
     async def get_status(self, approval_id: UUID) -> str | None:
-        """Return the persisted status of an approval (for UI/tests)."""
         async with session_scope() as session:
             row = await session.get(Approval, approval_id)
             return row.status if row is not None else None
-
-
-# ---------------------------------------------------------------------------
-# helpers
-# ---------------------------------------------------------------------------
 
 
 def _to_request(row: Approval) -> ApprovalRequest:
