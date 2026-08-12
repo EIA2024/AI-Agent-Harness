@@ -8,6 +8,7 @@ never read or searched. Reads refuse files larger than ``max_file_size``.
 
 from __future__ import annotations
 
+import asyncio
 import os
 import re
 
@@ -24,7 +25,23 @@ _SENSITIVE_PATTERNS = [
     re.compile(r"id_rsa", re.IGNORECASE),
     re.compile(r"credentials", re.IGNORECASE),
     re.compile(r"\.key$", re.IGNORECASE),
+    # P1-005: broaden the secret-boundary denylist (complementary to the root
+    # allowlist — not a replacement for a proper workspace allowlist).
+    re.compile(r"^\.git(ignore)?$", re.IGNORECASE),
+    re.compile(r"^\.ssh($|/)", re.IGNORECASE),
+    re.compile(r"\.p12$|\.pfx$|\.jks$", re.IGNORECASE),
+    re.compile(r"^secret", re.IGNORECASE),
+    re.compile(r"^\.npmrc$|^\.pypirc$|^\.netrc$", re.IGNORECASE),
+    re.compile(r"\.kubeconfig$|^\.kube/", re.IGNORECASE),
+    re.compile(r"^token", re.IGNORECASE),
+    re.compile(r"password", re.IGNORECASE),
+    re.compile(r"^\.aws($|/)", re.IGNORECASE),
+    re.compile(r"service_account", re.IGNORECASE),
+    re.compile(r"^\.dockercfg$|^\.docker/", re.IGNORECASE),
 ]
+
+#: Hard ceiling for directory recursion depth (P1-002).
+HARD_MAX_DEPTH = 12
 
 
 def _examples_summary(items: list[str], *, limit: int = 8) -> str:
@@ -37,7 +54,13 @@ def _examples_summary(items: list[str], *, limit: int = 8) -> str:
 
 
 class FilesystemConnector:
-    """Exposes filesystem.read/list/search/write tools rooted at ``allowed_root``."""
+    """Exposes filesystem.read/list/search/write tools rooted at ``allowed_root``.
+
+    The root is explicit and canonical (P1-004): when ``allowed_root`` is not
+    given it must come from ``PERSONAL_AI_WORKSPACE_ROOT``; falling back to the
+    process working directory would make the security boundary a side effect of
+    the launch directory, so that fallback is refused.
+    """
 
     connector_name = "filesystem"
 
@@ -48,9 +71,18 @@ class FilesystemConnector:
         max_file_size: int = DEFAULT_MAX_FILE_SIZE,
         max_depth: int = DEFAULT_MAX_DEPTH,
     ) -> None:
-        self.allowed_root = os.path.realpath(allowed_root or os.getcwd())
+        if allowed_root is None:
+            workspace = os.environ.get("PERSONAL_AI_WORKSPACE_ROOT")
+            if not workspace:
+                raise ValueError(
+                    "filesystem connector requires an explicit root: pass "
+                    "allowed_root or set PERSONAL_AI_WORKSPACE_ROOT "
+                    "(refusing to derive the security boundary from the cwd, P1-004)"
+                )
+            allowed_root = workspace
+        self.allowed_root = os.path.realpath(allowed_root)
         self.max_file_size = max_file_size
-        self.max_depth = max_depth
+        self.max_depth = max(min(max_depth or DEFAULT_MAX_DEPTH, HARD_MAX_DEPTH), 1)
 
     # ------------------------------------------------------------------
     # Tool descriptors
@@ -116,6 +148,8 @@ class FilesystemConnector:
                         "path": {"type": "string", "description": "Directory to search, relative to allowed root"},
                         "pattern": {"type": "string", "description": "Regular expression to match against file lines"},
                         "max_results": {"type": "integer", "minimum": 1, "default": 50},
+                        "mode": {"type": "string", "enum": ["literal", "regex"], "default": "literal"},
+                        "max_files": {"type": "integer", "minimum": 1, "default": 5000},
                     },
                     "required": ["path", "pattern"],
                     "additionalProperties": False,
@@ -169,7 +203,7 @@ class FilesystemConnector:
             if short == "list":
                 return self._list(arguments)
             if short == "search":
-                return self._search(arguments)
+                return await self._search(arguments)
             if short == "write":
                 return self._write(arguments)
             return ToolResult.fail(error=f"Unknown filesystem tool: {tool}", error_code="UNKNOWN_TOOL")
@@ -238,7 +272,9 @@ class FilesystemConnector:
     def _list(self, arguments: dict) -> ToolResult:
         path = arguments.get("path")
         recursive = bool(arguments.get("recursive", False))
-        max_depth = int(arguments.get("max_depth", 3))
+        # P1-002: clamp requested depth to the configured AND hard ceiling so a
+        # model can never request an unbounded recursive walk.
+        max_depth = min(int(arguments.get("max_depth", 3)), self.max_depth, HARD_MAX_DEPTH)
         resolved = self._resolve_path(path)
         if not os.path.isdir(resolved):
             return ToolResult.fail(error=f"not a directory: {path}", error_code="DIRECTORY_NOT_FOUND")
@@ -274,56 +310,78 @@ class FilesystemConnector:
             text=f"{len(entries)} entries{_examples_summary(names)}",
         )
 
-    def _search(self, arguments: dict) -> ToolResult:
+    async def _search(self, arguments: dict) -> ToolResult:
+        """Literal substring search by default; ``mode=regex`` is explicit.
+
+        P1-003: the scan runs off the event loop (``asyncio.to_thread``) with a
+        hard file-scan budget, so a large tree or a pathological regex cannot
+        block the server or burn unbounded CPU (ReDoS).
+        """
         path = arguments.get("path")
-        pattern = arguments.get("pattern")
+        pattern = str(arguments.get("pattern", ""))
+        mode = str(arguments.get("mode", "literal")).lower()
         max_results = int(arguments.get("max_results", 50))
+        max_files = int(arguments.get("max_files", 5000))
         resolved = self._resolve_path(path)
         if not os.path.isdir(resolved):
             return ToolResult.fail(error=f"not a directory: {path}", error_code="DIRECTORY_NOT_FOUND")
-        try:
-            compiled = re.compile(pattern)
-        except re.error as exc:
-            return ToolResult.fail(error=f"invalid search pattern: {exc}", error_code="FILESYSTEM_ERROR")
+        if not pattern:
+            return ToolResult.fail(error="empty search pattern", error_code="FILESYSTEM_ERROR")
+        if mode not in ("literal", "regex"):
+            return ToolResult.fail(error=f"invalid search mode: {mode!r} (literal|regex)", error_code="FILESYSTEM_ERROR")
+        compiled = None
+        if mode == "regex":
+            try:
+                compiled = re.compile(pattern)
+            except re.error as exc:
+                return ToolResult.fail(error=f"invalid regex: {exc}", error_code="FILESYSTEM_ERROR")
 
         root = os.path.normcase(os.path.realpath(self.allowed_root))
-        matches: list[dict] = []
-        for dirpath, _dirs, files in os.walk(resolved):
-            for fname in files:
-                if self._is_sensitive(fname):
-                    continue
-                full = os.path.join(dirpath, fname)
-                # Resolve symlinks and verify containment before opening.
-                real_full = os.path.realpath(full)
-                if os.path.commonpath([root, os.path.normcase(real_full)]) != root:
-                    continue
-                if not os.path.isfile(real_full):
-                    continue
-                try:
-                    if os.path.getsize(real_full) > self.max_file_size:
+
+        def _scan() -> tuple[list[dict], bool]:
+            matches: list[dict] = []
+            files_scanned = 0
+            for dirpath, _dirs, files in os.walk(resolved):
+                for fname in files:
+                    if files_scanned >= max_files:
+                        return matches, True  # budget exhausted → tell the model
+                    files_scanned += 1
+                    if self._is_sensitive(fname):
                         continue
-                    with open(real_full, encoding="utf-8", errors="replace") as fh:
-                        for lineno, line in enumerate(fh, 1):
-                            if compiled.search(line):
-                                matches.append(
-                                    {
-                                        "file": os.path.relpath(real_full, self.allowed_root),
-                                        "line": lineno,
-                                        "content": line.rstrip("\n")[:200],
-                                    }
-                                )
-                                if len(matches) >= max_results:
-                                    return ToolResult.ok(
-                                        data={"path": path, "pattern": pattern, "matches": matches},
-                                        text=f"{len(matches)} match(es)"
-                                        + _examples_summary([m.get('file') for m in matches if isinstance(m, dict)]),
+                    full = os.path.join(dirpath, fname)
+                    real_full = os.path.realpath(full)
+                    if os.path.commonpath([root, os.path.normcase(real_full)]) != root:
+                        continue
+                    if not os.path.isfile(real_full):
+                        continue
+                    try:
+                        if os.path.getsize(real_full) > self.max_file_size:
+                            continue
+                        with open(real_full, encoding="utf-8", errors="replace") as fh:
+                            for lineno, line in enumerate(fh, 1):
+                                hit = compiled.search(line) if mode == "regex" else pattern in line
+                                if hit:
+                                    matches.append(
+                                        {
+                                            "file": os.path.relpath(real_full, self.allowed_root),
+                                            "line": lineno,
+                                            "content": line.rstrip("\n")[:200],
+                                        }
                                     )
-                except OSError:
-                    continue
+                                    if len(matches) >= max_results:
+                                        return matches, False
+                    except OSError:
+                        continue
+            return matches, False
+
+        matches, budget_hit = await asyncio.to_thread(_scan)
+        text = f"{len(matches)} match(es)"
+        if budget_hit:
+            text += " (scan budget reached — narrow the path)"
+        text += _examples_summary([m.get("file") for m in matches if isinstance(m, dict)])
         return ToolResult.ok(
-            data={"path": path, "pattern": pattern, "matches": matches},
-            text=f"{len(matches)} match(es)"
-            + _examples_summary([m.get("file") for m in matches if isinstance(m, dict)]),
+            data={"path": path, "pattern": pattern, "mode": mode, "matches": matches},
+            text=text,
         )
 
     def _write(self, arguments: dict) -> ToolResult:

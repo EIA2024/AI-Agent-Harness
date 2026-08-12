@@ -129,10 +129,17 @@ class TestSearch:
         assert result.data["matches"] == []
 
     @pytest.mark.asyncio
-    async def test_search_invalid_pattern(self, connector):
-        result = await connector.execute("filesystem.search", {"path": ".", "pattern": "("}, ctx())
+    async def test_search_invalid_regex_mode_fails(self, connector):
+        result = await connector.execute(
+            "filesystem.search", {"path": ".", "pattern": "(", "mode": "regex"}, ctx()
+        )
         assert result.success is False
-        assert "invalid search pattern" in result.error
+        assert "invalid regex" in result.error
+
+    async def test_search_literal_parenthesis_is_valid(self, connector):
+        # P1-003: literal is the default — "(" is a fine substring, not a regex
+        result = await connector.execute("filesystem.search", {"path": ".", "pattern": "("}, ctx())
+        assert result.success is True
 
     @pytest.mark.asyncio
     async def test_search_skips_sensitive_files(self, connector):
@@ -211,3 +218,68 @@ async def test_search_summary_includes_example_files(tmp_path):
     result = await c.execute("filesystem.search", {"path": ".", "pattern": "needle"}, ctx())
     assert "1 match(es)" in result.text
     assert "one.py" in result.text
+
+
+def test_connector_requires_explicit_root(monkeypatch):
+    """P1-004 — no silent cwd root."""
+    monkeypatch.delenv("PERSONAL_AI_WORKSPACE_ROOT", raising=False)
+    with pytest.raises(ValueError, match="WORKSPACE_ROOT"):
+        FilesystemConnector()
+
+
+def test_connector_uses_workspace_root_env(monkeypatch, tmp_path):
+    monkeypatch.setenv("PERSONAL_AI_WORKSPACE_ROOT", str(tmp_path))
+    c = FilesystemConnector()
+    assert c.allowed_root == os.path.realpath(str(tmp_path))
+
+
+async def test_list_clamps_requested_depth(tmp_path):
+    """P1-002 — a model cannot request an unbounded recursive walk."""
+
+    from connectors.filesystem.connector import HARD_MAX_DEPTH
+
+    # build a tree deeper than the hard ceiling
+    node = tmp_path
+    for i in range(HARD_MAX_DEPTH + 2):
+        node = node / f"d{i}"
+        node.mkdir()
+    (node / "leaf.txt").write_text("x")
+
+    c = FilesystemConnector(allowed_root=str(tmp_path))
+    result = await c.execute(
+        "filesystem.list", {"path": ".", "recursive": True, "max_depth": 999}, ctx()
+    )
+    assert result.success
+    # walked at most HARD_MAX_DEPTH levels (no leaf.txt, no crash)
+    assert "leaf.txt" not in str(result.data)
+
+
+async def test_search_defaults_to_literal_and_supports_regex(tmp_path):
+    (tmp_path / "a.py").write_text("import os\n")
+    (tmp_path / "b.py").write_text("needle here\n")
+    c = FilesystemConnector(allowed_root=str(tmp_path))
+    # literal default
+    res = await c.execute("filesystem.search", {"path": ".", "pattern": "needle"}, ctx())
+    assert res.success and len(res.data["matches"]) == 1
+    assert res.data["matches"][0]["file"] == "b.py"
+    # explicit regex mode
+    res2 = await c.execute("filesystem.search", {"path": ".", "pattern": "^import", "mode": "regex"}, ctx())
+    assert res2.success and len(res2.data["matches"]) == 1
+    assert res2.data["matches"][0]["file"] == "a.py"
+    # invalid mode fails, not executes
+    res3 = await c.execute("filesystem.search", {"path": ".", "pattern": "x", "mode": "bogus"}, ctx())
+    assert res3.success is False
+
+
+async def test_sensitive_files_never_searched(tmp_path):
+    (tmp_path / ".env").write_text("SECRET=1\n")
+    (tmp_path / ".ssh").mkdir()
+    (tmp_path / "secret_token.txt").write_text("tok\n")
+    (tmp_path / "ok.txt").write_text("SECRET is fine\n")
+    c = FilesystemConnector(allowed_root=str(tmp_path))
+    res = await c.execute("filesystem.search", {"path": ".", "pattern": "SECRET"}, ctx())
+    assert res.success
+    files = [m["file"] for m in res.data["matches"]]
+    assert "ok.txt" in files
+    assert ".env" not in files
+    assert "secret_token.txt" not in files
