@@ -228,6 +228,13 @@ class FilesystemConnector:
             raise ValueError(f"path {path!r} escapes the allowed root")
         return resolved
 
+    def _is_within_root(self, resolved: str) -> bool:
+        root = os.path.normcase(os.path.realpath(self.allowed_root))
+        try:
+            return os.path.commonpath([root, os.path.normcase(resolved)]) == root
+        except ValueError:
+            return False
+
     @staticmethod
     def _is_sensitive(basename: str) -> bool:
         return any(p.search(basename) for p in _SENSITIVE_PATTERNS)
@@ -254,6 +261,14 @@ class FilesystemConnector:
             )
         try:
             with open(resolved, encoding=encoding) as fh:
+                # P1-006 (pragmatic): a symlink could be swapped between the
+                # earlier realpath() check and open(); re-verify containment now
+                # that the descriptor is open (full fix: openat/O_NOFOLLOW or a
+                # container sandbox).
+                if not self._is_within_root(os.path.realpath(fh.name)):
+                    return ToolResult.fail(
+                        error="path escaped the allowed root after open", error_code="FILESYSTEM_ERROR",
+                    )
                 lines = fh.readlines()
         except UnicodeDecodeError as exc:
             return ToolResult.fail(

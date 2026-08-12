@@ -796,7 +796,13 @@ class RunRunner:
             run.completed_at = _now()
             usage = dict(run.state.get("model_usage") or {}) if run.state else {}
             run.model_usage = usage
-            run.cost = {"usd": float(usage.get("cost_usd", 0.0) or 0.0), "currency": "usd"}
+            # P2-004: an unknown price must not masquerade as $0.00 — null means
+            # "pricing unavailable for this provider".
+            cost_usd = usage.get("cost_usd")
+            run.cost = {
+                "usd": float(cost_usd) if cost_usd is not None else None,
+                "currency": "usd",
+            }
             owner_uuid = run.owner_id
             session_id = run.session_id
         if self.event_bus is not None:
