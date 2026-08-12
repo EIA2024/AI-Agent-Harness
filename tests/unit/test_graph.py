@@ -248,6 +248,24 @@ def test_tool_message_content_includes_data_preview():
     content = _tool_message_content(entry)
     assert "1859 entries" in content
     assert "src" in content and "docs" in content
+    # small listing fits the preview: no truncation warning
+    assert "truncated" not in content
+
+
+def test_tool_message_content_truncation_is_explicit_and_actionable():
+    """A huge listing must warn the model it is only a sample, not the full set."""
+    from personal_ai_os.agent_runtime.graph import _TRUNCATED_HINT, _tool_message_content
+
+    entry = {
+        "text": "2000 items",
+        "data": {"entries": [{"name": f"file-{i}.py", "path": f"file-{i}.py", "is_dir": False} for i in range(2000)]},
+    }
+    content = _tool_message_content(entry)
+    assert "file-0.py" in content          # sample items present
+    assert "file-1999.py" not in content   # tail omitted
+    assert "entries_total" in content      # model told the true count
+    assert _TRUNCATED_HINT in content      # model told it's incomplete + how to narrow
+    assert len(content) < 5000             # bounded
 
 
 def test_tool_message_content_bounded_for_huge_data():

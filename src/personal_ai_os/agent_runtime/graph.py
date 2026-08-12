@@ -223,6 +223,14 @@ def _extract_tool_call_fields(pending: Any) -> tuple[str, dict]:
 _PREVIEW_MAX_ITEMS = 40
 _PREVIEW_MAX_CHARS = 2500
 
+# Advice appended when a result was truncated, so the model never mistakes a
+# sample for the full result and knows how to narrow the query.
+_TRUNCATED_HINT = (
+    "listing truncated — the sample above is NOT the full result. To find a "
+    "specific item, use a search/pattern tool or call list/search on a "
+    "narrower path instead of relying on this preview."
+)
+
 
 def _tool_message_content(entry: dict) -> str:
     """Content the model sees for a tool result.
@@ -232,32 +240,50 @@ def _tool_message_content(entry: dict) -> str:
     (e.g. ``filesystem.list`` → ``"1859 entries"``) starves the model of the
     actual content, so it cannot make progress and re-issues the same call until
     the tool-call limit stops it.
+
+    The preview is a sample, not the full result: when it is truncated the
+    message explicitly says so and points at narrower queries, so the model
+    never acts on an incomplete listing as if it were complete.
     """
     text = entry.get("text") or ""
     data = entry.get("data")
     if not data:
         return text or str(entry.get("error") or entry.get("content") or "")
-    preview = _preview_tool_data(data)
-    if text:
-        return f"{text}\n{preview}"
-    return preview
+    preview, truncated = _preview_tool_data(data)
+    parts = [p for p in (text, preview) if p]
+    if truncated:
+        parts.append(_TRUNCATED_HINT)
+    return "\n".join(parts)
 
 
-def _preview_tool_data(data: dict) -> str:
-    """JSON preview of a tool result, with list-heavy keys capped so large
-    results (directory listings, search hits, fetched content) stay within the
-    model context budget while still exposing real item names/values."""
+def _preview_tool_data(data: dict) -> tuple[str, bool]:
+    """JSON preview of a tool result with list-heavy keys capped.
+
+    Returns ``(encoded_preview, truncated)`` — ``truncated`` is True when a list
+    was capped or the encoded preview exceeded the character budget. True item
+    counts are placed at the FRONT of the JSON so they survive character
+    truncation and the model is never misled about how many items exist.
+    """
     preview: dict = {}
+    counts: dict = {}
+    truncated = False
     for key, value in data.items():
         if isinstance(value, list) and value and isinstance(value[0], (dict, str)):
-            preview[key] = value[:_PREVIEW_MAX_ITEMS]
-            preview[f"{key}_total"] = len(value)
+            if len(value) > _PREVIEW_MAX_ITEMS:
+                truncated = True
+                counts[f"{key}_total"] = len(value)
+                preview[key] = value[:_PREVIEW_MAX_ITEMS]
+            else:
+                preview[key] = value
         else:
             preview[key] = value
-    encoded = json.dumps(preview, ensure_ascii=False)
+    encoded = json.dumps({**counts, **preview}, ensure_ascii=False)
     if len(encoded) > _PREVIEW_MAX_CHARS:
-        encoded = encoded[:_PREVIEW_MAX_CHARS] + f" …[truncated, total {len(encoded)} chars]"
-    return encoded
+        encoded = encoded[:_PREVIEW_MAX_CHARS]
+        truncated = True
+    if truncated:
+        encoded += f" …[truncated, total {len(encoded)} chars]"
+    return encoded, truncated
 
 
 def _serialize_tool_result(result: Any, pending: Any, name: str, ctx: ToolExecutionContext,
