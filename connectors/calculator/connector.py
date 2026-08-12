@@ -147,6 +147,7 @@ class CalculatorConnector:
             timeout_seconds=5,
             retry_policy="none",
             tags=["math", "calculator", "arithmetic"],
+            result_trust="trusted_tool",
         )
 
     async def list_tools(self) -> list[ToolDescriptor]:

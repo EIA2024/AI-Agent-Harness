@@ -79,6 +79,7 @@ class FilesystemConnector:
                 idempotent=True,
                 timeout_seconds=10,
                 retry_policy="none",
+                result_trust="trusted_tool",
                 tags=["filesystem", "read", "file"],
             ),
             ToolDescriptor(
@@ -102,6 +103,7 @@ class FilesystemConnector:
                 idempotent=True,
                 timeout_seconds=10,
                 retry_policy="none",
+                result_trust="trusted_tool",
                 tags=["filesystem", "list", "directory"],
             ),
             ToolDescriptor(
@@ -125,6 +127,7 @@ class FilesystemConnector:
                 idempotent=True,
                 timeout_seconds=30,
                 retry_policy="none",
+                result_trust="trusted_tool",
                 tags=["filesystem", "search", "grep"],
             ),
             ToolDescriptor(
@@ -149,6 +152,7 @@ class FilesystemConnector:
                 idempotent=False,
                 timeout_seconds=10,
                 retry_policy="none",
+                result_trust="trusted_tool",
                 tags=["filesystem", "write", "file"],
             ),
         ]

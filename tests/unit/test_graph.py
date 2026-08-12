@@ -412,3 +412,22 @@ async def test_stream_break_before_first_token_retries_non_streaming():
         assert response.content == "ok"
     finally:
         streams.unregister(run_id)
+
+
+def test_result_trust_fails_closed_when_unknown():
+    """P1-007 — a tool result with no declared trust is untrusted, not trusted."""
+    from personal_ai_os.agent_runtime.graph import _serialize_tool_result
+    from personal_ai_os.common.models import ToolExecutionContext, ToolResult
+
+    pending = {"id": "c1", "function": {"name": "web.get", "arguments": '{"url": "x"}'}}
+    ctx = ToolExecutionContext(run_id=uuid.uuid4(), owner_id=uuid.uuid4())
+    res = _serialize_tool_result(
+        ToolResult.ok(text="web content"), pending, "web.get", ctx, {"url": "x"}, tool_trust=None
+    )
+    assert res["trust"] == "untrusted_tool"  # fail-closed
+
+    trusted = _serialize_tool_result(
+        ToolResult.ok(text="2"), pending, "calculator.evaluate", ctx, {"expression": "1+1"},
+        tool_trust="trusted_tool",
+    )
+    assert trusted["trust"] == "trusted_tool"
