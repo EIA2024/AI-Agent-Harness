@@ -19,10 +19,17 @@ from ..common.models import AuthError, ToolDescriptor
 
 
 class CredentialBroker:
-    """Resolves credential scopes to secrets and injects them into arguments."""
+    """Resolves credential scopes to secrets and injects them into arguments.
+
+    ``source`` supports two layouts:
+      * flat ``{scope: secret}`` — single-user / legacy; any owner may use it.
+      * owner-scoped ``{owner_id: {scope: secret}}`` — P0-007: a secret is bound
+        to its owner, and a different owner can never resolve it. In
+        owner-scoped mode the process-global env fallback is DISABLED so a
+        secret configured for one user is never auto-granted to another.
+    """
 
     def __init__(self, *, source: dict | None = None):
-        #: scope -> secret. Overrides environment variables (used by tests).
         self.source = dict(source or {})
 
     # -- resolution --------------------------------------------------------
@@ -31,14 +38,27 @@ class CredentialBroker:
         """Map a scope like ``github.token`` to an env var like ``GITHUB_TOKEN``."""
         return scope.replace(".", "_").replace("-", "_").upper()
 
-    def resolve_secret(self, scope: str) -> str | None:
-        """Return the raw secret for a scope, or None if it is not configured."""
+    def _is_owner_scoped(self) -> bool:
+        return any(isinstance(value, dict) for value in self.source.values())
+
+    def resolve_secret(self, scope: str, owner_id: Any = None) -> str | None:
+        """Return the raw secret for a scope + owner, or None if not configured."""
+        if self._is_owner_scoped():
+            key = str(owner_id) if owner_id is not None else None
+            if key is not None and key in self.source:
+                return (self.source[key] or {}).get(scope)
+            return None  # no global fallback in owner-scoped mode (P0-007)
         if scope in self.source:
             return self.source[scope]
         return os.environ.get(self._env_key(scope))
 
-    def secret_ref(self, scope: str) -> str | None:
+    def secret_ref(self, scope: str, owner_id: Any = None) -> str | None:
         """Return a *reference* to the secret (never the value), or None."""
+        if self._is_owner_scoped():
+            key = str(owner_id) if owner_id is not None else None
+            if key is not None and key in self.source and scope in (self.source[key] or {}):
+                return f"owner:{key}:{scope}"
+            return None
         if scope in self.source:
             return f"source:{scope}"
         if os.environ.get(self._env_key(scope)):
@@ -56,11 +76,11 @@ class CredentialBroker:
         injected = dict(arguments)
         secrets: dict[str, dict] = {}
         for scope in tool.credential_scope or []:
-            secret = self.resolve_secret(scope)
+            secret = self.resolve_secret(scope, owner_id=owner_id)
             if secret is None:
                 raise AuthError(
-                    f"Credential for scope {scope!r} is not configured "
-                    f"(expected env var {self._env_key(scope)}).",
+                    f"Credential for scope {scope!r} is not configured for this owner "
+                    f"(expected owner-scoped secret or env var {self._env_key(scope)}).",
                     detail={"tool": tool.name, "scope": scope},
                 )
             # ``token`` envelope => LogSanitizer.sanitize_dict redacts the value.

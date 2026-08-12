@@ -92,3 +92,29 @@ async def test_no_credential_scope_is_noop():
     )
     injected = await broker.inject(tool, {"expression": "1+1"}, owner_id=uuid4())
     assert injected == {"expression": "1+1"}
+
+
+async def test_owner_scoped_secrets_are_isolated():
+    """P0-007 — owner B must never resolve owner A's secret or a global fallback."""
+    owner_a = uuid4()
+    owner_b = uuid4()
+    broker = CredentialBroker(source={str(owner_a): {"github.token": "A-SECRET"}})
+
+    # A resolves their own secret
+    injected = await broker.inject(github_tool(), {"repo": "x"}, owner_id=owner_a)
+    assert injected["_secrets"]["github.token"]["token"] == "A-SECRET"
+    assert broker.resolve_secret("github.token", owner_id=owner_a) == "A-SECRET"
+
+    # B resolves nothing — not A's secret, not a global env fallback
+    assert broker.resolve_secret("github.token", owner_id=owner_b) is None
+    assert broker.secret_ref("github.token", owner_id=owner_b) is None
+    with pytest.raises(AuthError):
+        await broker.inject(github_tool(), {"repo": "x"}, owner_id=owner_b)
+
+
+async def test_owner_scoped_mode_disables_global_env_fallback(monkeypatch):
+    """P0-007 — owner-scoped mode must not auto-grant a process-global env secret."""
+    owner = uuid4()
+    monkeypatch.setenv("GITHUB_TOKEN", "GLOBAL-SECRET")
+    broker = CredentialBroker(source={str(owner): {}})  # owner exists but has no token
+    assert broker.resolve_secret("github.token", owner_id=owner) is None
