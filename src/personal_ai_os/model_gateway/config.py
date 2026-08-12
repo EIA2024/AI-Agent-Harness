@@ -44,6 +44,38 @@ def _now() -> str:
     return datetime.now(UTC).isoformat()
 
 
+class SecretVault:
+    """Best-effort OS-keyring storage for provider API keys (P2-001).
+
+    When the ``keyring`` package is importable the key is mirrored into the OS
+    keyring (Windows DPAPI / macOS Keychain / Secret Service); the JSON profile
+    keeps the value only as a backward-compatible fallback. If keyring is not
+    installed, the file remains the store (with the secret still not committed
+    to git).
+    """
+
+    _SERVICE = "personal-ai-os"
+
+    @classmethod
+    def set(cls, name: str, key: str) -> bool:
+        try:
+            import keyring  # type: ignore[import-not-found]
+
+            keyring.set_password(cls._SERVICE, name, key)
+            return True
+        except Exception:  # noqa: BLE001 - keyring unavailable → file fallback
+            return False
+
+    @classmethod
+    def get(cls, name: str) -> str | None:
+        try:
+            import keyring  # type: ignore[import-not-found]
+
+            return keyring.get_password(cls._SERVICE, name)
+        except Exception:  # noqa: BLE001
+            return None
+
+
 def _is_loopback(host: str) -> bool:
     import ipaddress
 
@@ -181,6 +213,8 @@ class ProviderConfigStore:
 
     def add(self, profile: ProviderProfile, *, activate: bool = True) -> None:
         _validate_base_url(profile.base_url, profile.name)
+        if profile.api_key:
+            SecretVault.set(profile.name, profile.api_key)  # P2-001: mirror to keyring
         data = self.load()
         data["profiles"][profile.name] = profile
         if activate or data["active"] is None:

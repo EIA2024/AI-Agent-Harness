@@ -50,6 +50,9 @@ class User(Base):
     username: Mapped[str] = mapped_column(String(120), unique=True)
     display_name: Mapped[str | None] = mapped_column(String(200))
     api_key: Mapped[str | None] = mapped_column(String(128), unique=True)
+    # P1-021: HMAC digest of the api key (legacy rows keep plaintext until
+    # re-hashed; auth verifies by hash first, then plaintext fallback).
+    api_key_hash: Mapped[str | None] = mapped_column(String(64))
     timezone: Mapped[str] = mapped_column(String(64), default="UTC")
     config: Mapped[dict] = mapped_column(JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)

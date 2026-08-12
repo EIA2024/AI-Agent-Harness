@@ -331,3 +331,33 @@ def test_base_url_requires_https_for_remote(tmp_path, monkeypatch):
     store.add(ProviderProfile(name="local", format="openai", api_key="k",
                               base_url="http://localhost:11434/v1"))
     assert store.get("local") is not None
+
+
+def test_secret_vault_mirrors_to_keyring(monkeypatch):
+    """P2-001 — when keyring is available the key is mirrored into it."""
+    import sys
+    from types import SimpleNamespace
+
+    from personal_ai_os.model_gateway.config import SecretVault
+
+    store = {}
+    fake_keyring = SimpleNamespace(
+        set_password=lambda service, name, key: store.__setitem__(f"{service}:{name}", key),
+        get_password=lambda service, name: store.get(f"{service}:{name}"),
+    )
+    monkeypatch.setitem(sys.modules, "keyring", fake_keyring)
+    assert SecretVault.set("main", "sk-secret") is True
+    assert SecretVault.get("main") == "sk-secret"
+    assert store.get("personal-ai-os:main") == "sk-secret"
+
+
+def test_secret_vault_falls_back_without_keyring(monkeypatch):
+    """P2-001 — without keyring, set/get are no-ops (file remains the store)."""
+    import sys
+
+    from personal_ai_os.model_gateway.config import SecretVault
+
+    monkeypatch.delitem(sys.modules, "keyring", raising=False)
+    monkeypatch.setitem(sys.modules, "keyring", None)  # makes import fail
+    assert SecretVault.set("main", "k") is False
+    assert SecretVault.get("main") is None

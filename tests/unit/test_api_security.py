@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import uuid
+
 import pytest
 
 from personal_ai_os.gateway.services import ServiceContainer
@@ -69,3 +71,25 @@ async def test_oversized_message_text_rejected_by_schema(make_api):
             f"/v1/sessions/{sid}/messages", json=huge, headers={"X-API-Key": "body-key"}
         )
         assert r2.status_code == 422  # max_length enforced
+
+
+@pytest.mark.asyncio
+async def test_api_key_auth_verifies_hash_and_plaintext(make_api):
+    """P1-021 — auth works for hashed AND legacy plaintext keys."""
+
+    from apps.api.deps import _hash_api_key
+    from personal_ai_os.db.models import User
+    from personal_ai_os.db.session import session_scope
+
+    async with session_scope() as s:
+        s.add(User(username=f"h{uuid.uuid4().hex[:6]}", api_key="hashed-key",
+                  api_key_hash=_hash_api_key("hashed-key")))
+        s.add(User(username=f"p{uuid.uuid4().hex[:6]}", api_key="plain-key"))
+        await s.flush()
+    async with make_api(services=ServiceContainer()) as ac:
+        r1 = await ac.get("/v1/sessions", headers={"X-API-Key": "hashed-key"})
+        assert r1.status_code == 200
+        r2 = await ac.get("/v1/sessions", headers={"X-API-Key": "plain-key"})
+        assert r2.status_code == 200
+        r3 = await ac.get("/v1/sessions", headers={"X-API-Key": "wrong-key"})
+        assert r3.status_code == 401
