@@ -33,13 +33,14 @@ def upgrade() -> None:
         sqlite_where=sa.text("status = 'running'"),
         postgresql_where=sa.text("status = 'running'"),
     )
-    op.create_unique_constraint(
-        "uq_toolcall_run_idem", "tool_calls", ["run_id", "idempotency_key"]
+    # A unique index is portable to SQLite; ALTER TABLE ADD CONSTRAINT is not.
+    op.create_index(
+        "uq_toolcall_run_idem", "tool_calls", ["run_id", "idempotency_key"], unique=True
     )
 
 
 def downgrade() -> None:
-    op.drop_constraint("uq_toolcall_run_idem", "tool_calls", type_="unique")
+    op.drop_index("uq_toolcall_run_idem", table_name="tool_calls")
     op.drop_index("uq_run_one_active_per_session", table_name="runs")
     op.drop_column("runs", "lease_expires_at")
     op.drop_column("runs", "lease_owner")
