@@ -223,6 +223,19 @@ class ToolBroker:
             exec_args = {k: v for k, v in exec_args.items() if k != "_secrets"}
 
         timeout = float(tool.timeout_seconds) if tool.timeout_seconds and tool.timeout_seconds > 0 else 30.0
+        # P1-033: for R3/R4 tools a durable security intent must be persisted
+        # BEFORE execution; if it cannot be, fail closed rather than run an
+        # untracked side effect.
+        if not await self._durable_intent(tool, context, arguments):
+            await self._audit(
+                "tool.intent_blocked", tool, context,
+                {"reason": "durable audit intent could not be persisted"},
+            )
+            return await self._finish_failure(
+                tool, context, started, err_code=ERR_DENIED,
+                message="Blocked: could not persist the security intent for this R3/R4 tool",
+                event=EventTypes.TOOL_DENIED, risk_level=tool.risk_level, arguments=arguments,
+            )
         try:
             async with asyncio.timeout(timeout):
                 result = await connector.execute(tool.name, exec_args, context)
@@ -369,6 +382,50 @@ class ToolBroker:
             await self._event_bus.publish(event)
         except Exception as exc:  # event publishing must never break execution
             logger.warning("Failed to publish %s event: %s", event_type, exc)
+
+    async def _durable_intent(
+        self,
+        tool: ToolDescriptor,
+        context: ToolExecutionContext,
+        arguments: dict,
+    ) -> bool:
+        """Persist a durable security intent before an R3/R4 tool executes (P1-033).
+
+        A best-effort audit is not enough for high-risk tools: the intent must
+        survive a crash so a later reconciler can prove the tool ran. Returns
+        False when the intent could not be persisted (caller fails closed).
+        """
+        if (tool.risk_level or 0) < 3:
+            return True
+        try:
+            from personal_ai_os.db.models import AuditEvent
+            from personal_ai_os.db.session import session_scope
+
+            async with session_scope() as s:
+                s.add(
+                    AuditEvent(
+                        owner_id=context.owner_id,
+                        actor_type="agent",
+                        actor_id=str(context.run_id),
+                        event_type="tool.intent",
+                        resource_type="tool",
+                        resource_id=tool.name,
+                        details={
+                            "tool": tool.name,
+                            "risk_level": tool.risk_level,
+                            "run_id": str(context.run_id),
+                            "arguments": arguments,
+                            "intent": True,
+                        },
+                    )
+                )
+            return True
+        except Exception as exc:  # noqa: BLE001
+            logger.error(
+                "Durable audit intent FAILED for R%d tool %s: %s — failing closed",
+                tool.risk_level, tool.name, exc,
+            )
+            return False
 
     async def _audit(
         self,

@@ -326,3 +326,20 @@ ALL_MODELS = [
     User, Agent, ExternalIdentity, Project, Session, Message, Run, RunStep,
     ToolCall, Approval, MemoryRow, MemoryLink, Skill, Automation, Artifact, AuditEvent,
 ]
+
+
+class EventLog(Base):
+    """Durable run event log (P1-020).
+
+    Live SSE events are appended here so a restart (or a different worker) can
+    replay a run's stream instead of losing it when the in-process queue is gone.
+    """
+
+    __tablename__ = "event_log"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    run_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("runs.id"), index=True)
+    seq: Mapped[int] = mapped_column(Integer, default=0)
+    event_type: Mapped[str] = mapped_column(String(64))
+    data: Mapped[dict] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)

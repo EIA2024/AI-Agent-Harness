@@ -101,6 +101,19 @@ async def stream_run(run_id: UUID, user=Depends(resolve_user)):
                     break
             return
 
+        # P1-020: if a durable event log exists for this run (written by a
+        # possibly-different worker), replay it instead of the RunStep walk —
+        # this survives process restarts and multi-worker deployments.
+        from personal_ai_os.agent_runtime import event_log
+
+        durable = await event_log.replay_run_events(run.id)
+        if durable:
+            seq = 0
+            for entry in durable:
+                seq += 1
+                yield _envelope(entry["event"], entry["data"], seq)
+            return
+
         # Replay path: run already finished (or paused for approval).
         async with session_scope() as s:
             steps_result = await s.execute(

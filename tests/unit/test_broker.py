@@ -583,3 +583,57 @@ async def test_result_data_size_is_bounded():
     # the data was replaced by a bounded marker
     assert result.data.get("truncated") is True
     assert result.raw_size_bytes and result.raw_size_bytes > 0
+
+
+def _r3_tool() -> ToolDescriptor:
+    t = echo_tool()
+    t.name = "mail.send"
+    t.risk_level = 3
+    t.side_effect = True
+    return t
+
+
+class R3Connector(FakeConnector):
+    async def list_tools(self) -> list[ToolDescriptor]:
+        return [_r3_tool()]
+
+
+async def test_r3_execution_writes_durable_intent():
+    """P1-033 — an R3 tool persists a durable intent before executing."""
+    from sqlalchemy import select
+
+    from personal_ai_os.db.models import AuditEvent, User
+    from personal_ai_os.db.session import session_scope
+
+    owner_id = uuid4()
+    async with session_scope() as s:
+        s.add(User(username=f"r3{uuid4().hex[:6]}", api_key=f"k{uuid4().hex[:8]}", id=owner_id))
+        await s.flush()
+    connector = R3Connector()
+    broker, registry, _ = make_broker(connector=connector)
+    await broker.register_connector(connector)
+    result = await broker.execute("mail.send", {"message": "hi"}, ctx(owner_id=owner_id))
+    assert result.success
+    assert connector.executed  # the connector ran
+    async with session_scope() as s:
+        intents = (await s.execute(
+            select(AuditEvent).where(AuditEvent.event_type == "tool.intent")
+        )).scalars().all()
+        assert intents, "expected a durable tool.intent record"
+        assert intents[0].resource_id == "mail.send"
+
+
+async def test_r3_intent_failure_fails_closed(monkeypatch):
+    """P1-033 — if the durable intent cannot be persisted, the tool never runs."""
+    connector = R3Connector()
+    broker, registry, _ = make_broker(connector=connector)
+    await broker.register_connector(connector)
+
+    async def _boom(*a, **k):
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr("personal_ai_os.db.session.session_scope", _boom)
+    result = await broker.execute("mail.send", {"message": "hi"}, ctx())
+    assert result.success is False
+    assert result.error_code == "POLICY_DENIED"
+    assert connector.executed == []  # never executed

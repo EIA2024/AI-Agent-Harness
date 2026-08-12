@@ -69,3 +69,28 @@ async def test_session_serialized_concurrency_blocks_second_run():
         await s.flush()
     with pytest.raises(SessionBusyError):
         await runner.start(session_id=session_id, owner_id=owner_id, user_input="second")
+
+
+@pytest.mark.asyncio
+async def test_durable_event_log_append_and_replay():
+    """P1-020 — events appended durably can be replayed after the queue is gone."""
+    from sqlalchemy import select
+
+    from personal_ai_os.agent_runtime import event_log
+    from personal_ai_os.db.models import Run, User
+    from personal_ai_os.db.session import session_scope
+    from tests.integration.test_vertical_slice import build_stack as _bs
+
+    await _bs([{"content": "hi"}])
+    async with session_scope() as s:
+        owner_id = (await s.execute(select(User))).scalars().first().id
+        run = Run(owner_id=owner_id, status="running", input={})
+        s.add(run)
+        await s.flush()
+        run_id = run.id
+    await event_log.append_run_event(run_id, "run.started", {"run_id": str(run_id)})
+    await event_log.append_run_event(run_id, "run.completed", {"run_id": str(run_id), "status": "completed"})
+    events = await event_log.replay_run_events(run_id)
+    types = [e["event"] for e in events]
+    assert types == ["run.started", "run.completed"]
+    assert events[1]["data"]["status"] == "completed"

@@ -420,6 +420,11 @@ class RunRunner:
             if approval_info is not None:
                 payload.update(approval_info)
             push_live(run_id, terminal, payload)
+            # P1-020: persist the terminal event durably so a restart / another
+            # worker can still replay it (best-effort).
+            from personal_ai_os.agent_runtime import event_log
+
+            await event_log.append_run_event(run_id, terminal, payload)
             streams.unregister(run_id)
             self._bg_tasks.pop(str(run_id), None)
 
