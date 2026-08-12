@@ -49,11 +49,43 @@ async def ensure_database() -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    _warn_insecure_config()
     await ensure_database()
     await ensure_dev_owner()
     # Async wiring: register connector tools, build the graph + runner.
     await complete_wiring(app.state.services)
     yield
+
+
+# Weak dev values that must never reach production (P0-006).
+_WEAK_DEV_KEYS = {"dev-key", "changeme", "password", "secret", "test"}
+_WEAK_DB_PASSWORD_PATTERNS = (":pass@", ":password@", ":secret@", ":dev@", ":test@")
+
+
+def _warn_insecure_config() -> None:
+    """Log startup warnings when the configuration looks insecure (P0-006)."""
+    import logging
+    import os
+
+    logger = logging.getLogger("personal_ai_os.config")
+    dev_key = os.environ.get("PERSONAL_AI_DEV_API_KEY")
+    if dev_key and dev_key.lower() in _WEAK_DEV_KEYS:
+        logger.warning(
+            "PERSONAL_AI_DEV_API_KEY is set to a well-known weak value %r — "
+            "do not deploy this to a shared environment",
+            dev_key,
+        )
+    db_url = os.environ.get("DATABASE_URL", "")
+    if any(pattern in db_url.lower() for pattern in _WEAK_DB_PASSWORD_PATTERNS):
+        logger.warning(
+            "DATABASE_URL appears to embed a placeholder password — set a real "
+            "credential (P0-006)"
+        )
+    if not dev_key:
+        logger.info(
+            "No PERSONAL_AI_DEV_API_KEY set — dev owner is disabled (auth requires "
+            "a user with a configured key)"
+        )
 
 
 def healthz() -> dict:
