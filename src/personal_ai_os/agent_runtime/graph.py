@@ -106,11 +106,85 @@ class ModelStreamError(Exception):
     idempotency token.
     """
 
+
 logger = logging.getLogger(__name__)
 
-#: Unbounded-autonomous-loop guard — maximum tool calls a single run may make
-#: before the graph forces the model to conclude (blueprint §19, threat #12).
+#: Unbounded-autonomous-loop guard — maximum non-repeat-blocked tool turns a
+#: single run may make before the graph forces the model to conclude.
 MAX_TOOL_CALLS = 5
+#: A repeated identical successful call is already rejected by tool_request.
+#: Give the model one chance to recover with a genuinely different call; if it
+#: ignores the guard twice in a row, reclaim control before MAX_TOOL_CALLS.
+MAX_CONSECUTIVE_REPEAT_BLOCKS = 2
+_REPEAT_BLOCK_CODE = "TOOL_REPEAT_BLOCKED"
+
+
+def _tool_limit_count(state: dict) -> int:
+    """Count tool turns that should consume the global tool-call budget.
+
+    ``TOOL_REPEAT_BLOCKED`` is a runtime pseudo-result: no connector executed
+    and the model is handled by the stricter consecutive-repeat convergence
+    guard below. Counting it again toward ``MAX_TOOL_CALLS`` made the
+    anti-repeat guard itself accelerate global exhaustion.
+    """
+    return sum(
+        1
+        for entry in (state.get("tool_results") or [])
+        if not isinstance(entry, dict) or entry.get("error_code") != _REPEAT_BLOCK_CODE
+    )
+
+
+def _consecutive_repeat_blocks(state: dict) -> int:
+    """Number of trailing identical-call blocks since the last real result."""
+    count = 0
+    for entry in reversed(state.get("tool_results") or []):
+        if isinstance(entry, dict) and entry.get("error_code") == _REPEAT_BLOCK_CODE:
+            count += 1
+        else:
+            break
+    return count
+
+
+def _successful_tool_names(state: dict, *, limit: int = 4) -> list[str]:
+    """Recent successful tool names, de-duplicated for a bounded model hint."""
+    names: list[str] = []
+    seen: set[str] = set()
+    for entry in reversed(state.get("tool_results") or []):
+        if not isinstance(entry, dict) or not entry.get("success"):
+            continue
+        name = str(entry.get("tool_name") or "").strip()
+        if not name or name in seen:
+            continue
+        names.append(name)
+        seen.add(name)
+        if len(names) >= limit:
+            break
+    names.reverse()
+    return names
+
+
+def _tool_convergence_message(state: dict) -> str | None:
+    """Runtime-generated anti-loop reminder placed before the next decision."""
+    names = _successful_tool_names(state)
+    repeats = _consecutive_repeat_blocks(state)
+    if not names and not repeats:
+        return None
+    parts = ["【工具循环收敛约束】"]
+    if names:
+        parts.append(
+            "本轮已经成功获得工具结果（" + ", ".join(names) + "）。"
+            "优先基于这些结果回答；不要为了确认、重试或换一个近似参数而继续调用。"
+        )
+    if repeats:
+        parts.append(
+            f"最近有 {repeats} 次重复调用被 TOOL_REPEAT_BLOCKED 拦截。"
+            "这表示此前等价调用已经成功，不表示工具不可用。"
+        )
+    parts.append(
+        "只有当回答用户仍明确缺少某项必要信息，而且下一次调用会产生实质新信息时，"
+        "才允许继续调用工具。"
+    )
+    return "".join(parts)
 
 
 class RuntimeState(AgentState, total=False):
@@ -125,6 +199,10 @@ class RuntimeState(AgentState, total=False):
     _cached_context: dict
     #: MemGPT-style compaction: summary of turns older than the recent window
     conversation_summary: str
+    #: Diagnostics: total exact-repeat tool requests blocked in this run.
+    tool_repeat_blocked_count: int
+    #: Diagnostics: why the convergence guard finally reclaimed control.
+    tool_loop_guard_reason: str | None
 
 
 # ---------------------------------------------------------------------------
@@ -435,6 +513,8 @@ async def intake(state: AgentState, deps: _Deps) -> dict:
         "memory_candidates": state.get("memory_candidates") or [],
         "skill_candidates": state.get("skill_candidates") or [],
         "model_usage": state.get("model_usage") or {},
+        "tool_repeat_blocked_count": state.get("tool_repeat_blocked_count", 0),
+        "tool_loop_guard_reason": state.get("tool_loop_guard_reason"),
     }
 
 
@@ -458,30 +538,67 @@ async def decide(state: AgentState, deps: _Deps) -> dict:
     Reuses the cached context from ``build_context`` when available, falling
     back to a fresh build only when the cache is absent (e.g. observe loop
     where state has changed).
+
+    Loop-hardening is intentionally enforced *before* the model chooses its
+    next action: successful results produce a concise anti-repeat reminder,
+    exact-repeat pseudo-results do not consume the global connector budget,
+    and two consecutive ignored repeat blocks reclaim tool control early.
     """
     cached = state.get("_cached_context")
     if cached is not None and isinstance(cached, dict) and cached.get("messages"):
         built = cached
     else:
         built = await deps.context_engine.build(state)
-    tools = await _available_tool_schemas(deps.tool_broker, state)
 
-    # Unbounded-autonomous-loop guard (blueprint §19): once the run has made
-    # MAX_TOOL_CALLS tool calls, stop offering tools and force the model to
-    # conclude from what it has, rather than looping forever.
-    if len(state.get("tool_results") or []) >= MAX_TOOL_CALLS:
+    tool_count = _tool_limit_count(state)
+    repeat_blocks = _consecutive_repeat_blocks(state)
+    force_reason: str | None = None
+    if repeat_blocks >= MAX_CONSECUTIVE_REPEAT_BLOCKS:
+        force_reason = "repeat_blocked"
+    elif tool_count >= MAX_TOOL_CALLS:
+        force_reason = "max_tool_calls"
+
+    messages = list(built["messages"])
+    convergence_hint = _tool_convergence_message(state)
+    if convergence_hint:
+        messages.append({"role": "system", "content": convergence_hint})
+
+    if force_reason == "repeat_blocked":
         tools = None
-        messages = list(built["messages"]) + [
+        messages.append(
             {
                 "role": "system",
                 "content": (
-                    "工具调用已达上限，不能再调用任何工具。"
+                    "连续重复工具调用已经被拦截两次，本回合现在停止工具探索。"
+                    "请基于此前成功获得的结果直接回答用户；不得声称工具不可用。"
+                    "如果信息仍不足，明确说明缺失信息即可。"
+                ),
+            }
+        )
+    elif force_reason == "max_tool_calls":
+        tools = None
+        messages.append(
+            {
+                "role": "system",
+                "content": (
+                    "真实工具调用已达上限，不能再调用任何工具。"
                     "请基于已有信息直接回答用户；如果信息不足，如实说明并给出下一步建议。"
                 ),
             }
-        ]
+        )
     else:
-        messages = built["messages"]
+        tools = await _available_tool_schemas(deps.tool_broker, state)
+
+    if force_reason:
+        logger.warning(
+            "Tool-loop guard forced conclusion run=%s reason=%s tool_count=%d "
+            "consecutive_repeat_blocks=%d repeat_blocked_total=%d",
+            state.get("run_id"),
+            force_reason,
+            tool_count,
+            repeat_blocks,
+            state.get("tool_repeat_blocked_count", 0),
+        )
 
     request = ModelRequest(
         purpose="assistant",
@@ -491,18 +608,22 @@ async def decide(state: AgentState, deps: _Deps) -> dict:
     response = await _model_call(deps, state, request)
     usage = _merge_usage(state.get("model_usage"), response.usage)
 
-    # If the loop is exhausted, ignore any (stale) tool call and respond instead.
-    if len(state.get("tool_results") or []) >= MAX_TOOL_CALLS:
+    # A provider may emit a stale tool call even after tools were removed.
+    # Convergence policy is runtime-owned, so ignore it and route to respond.
+    if force_reason:
         response.tool_calls = None
 
     tool_calls = response.tool_calls
+    common: dict = {"model_usage": usage}
+    if force_reason:
+        common["tool_loop_guard_reason"] = force_reason
     if tool_calls:
         pending = tool_calls[0] if isinstance(tool_calls, list) else tool_calls
         return {
             "status": "deciding",
             "pending_tool_call": pending,
             "pending_response": None,
-            "model_usage": usage,
+            **common,
         }
     return {
         "status": "deciding",
@@ -514,7 +635,7 @@ async def decide(state: AgentState, deps: _Deps) -> dict:
             "provider": response.provider,
             "usage": response.usage.to_dict() if response.usage else None,
         },
-        "model_usage": usage,
+        **common,
     }
 
 
@@ -551,7 +672,6 @@ async def tool_request(state: AgentState, deps: _Deps) -> dict:
     except ToolArgumentParseError as exc:
         # P1-031: invalid args must never execute with {} — surface the parse
         # error as a failed tool result so the model sees it and can recover.
-        run_uuid = UUID(str(state.get("run_id") or uuid.uuid4()))
         return {
             "status": "executing_tool",
             "pending_tool_call": None,
@@ -600,13 +720,22 @@ async def tool_request(state: AgentState, deps: _Deps) -> dict:
                 f"工具 {name} 的这组参数此前已成功执行（结果：{summary or '同上'}）。"
                 "请勿重复相同调用；使用已有结果，或改用 search / 更窄路径 / 不同参数。"
             ),
-            "error_code": "TOOL_REPEAT_BLOCKED",
+            "error_code": _REPEAT_BLOCK_CODE,
             "arguments": arguments,
         }
+        blocked_total = int(state.get("tool_repeat_blocked_count", 0) or 0) + 1
+        logger.info(
+            "Blocked repeated tool call run=%s tool=%s blocked_total=%d",
+            state.get("run_id"),
+            name,
+            blocked_total,
+        )
         return {
             "status": "executing_tool",
             "pending_tool_call": None,
+            "pending_approval": None,
             "tool_results": existing + [blocked],
+            "tool_repeat_blocked_count": blocked_total,
             "_cached_context": None,  # P0-001: tool_results changed
         }
 
@@ -920,9 +1049,16 @@ async def memory_commit(state: AgentState, deps: _Deps) -> dict:
 
 
 def route_after_tool_request(state: AgentState) -> str:
-    """Approval needed → approval node; otherwise proceed to execute."""
+    """Approval needed → approval; pseudo-results skip execute → observe."""
     if state.get("status") == "waiting_approval":
         return "approval"
+    results = state.get("tool_results") or []
+    if results and isinstance(results[-1], dict) and results[-1].get("error_code") in {
+        _REPEAT_BLOCK_CODE,
+        "TOOL_ARGUMENT_PARSE_ERROR",
+    }:
+        # No connector executed, so do not mark a plan step done / advance it.
+        return "observe"
     return "execute"
 
 
@@ -985,7 +1121,7 @@ def build_graph(
     graph.add_conditional_edges(
         "tool_request",
         route_after_tool_request,
-        {"execute": "execute", "approval": "approval"},
+        {"execute": "execute", "approval": "approval", "observe": "observe"},
     )
     graph.add_conditional_edges(
         "approval",
