@@ -317,3 +317,17 @@ async def test_openai_stream_tool_call():
     assert fn["name"] == "calculator.evaluate"  # mapped back from sanitized
     import json as _json
     assert _json.loads(fn["arguments"]) == {"expression": "1+1"}
+
+
+def test_base_url_requires_https_for_remote(tmp_path, monkeypatch):
+    from personal_ai_os.model_gateway import ProviderConfigStore
+
+    monkeypatch.setenv("PERSONAL_AI_CONFIG_DIR", str(tmp_path))
+    store = ProviderConfigStore()
+    with pytest.raises(ValueError, match="https"):
+        store.add(ProviderProfile(name="plain", format="openai", api_key="k",
+                                  base_url="http://api.example.com/v1"))
+    # loopback http is allowed (local models)
+    store.add(ProviderProfile(name="local", format="openai", api_key="k",
+                              base_url="http://localhost:11434/v1"))
+    assert store.get("local") is not None

@@ -44,6 +44,37 @@ def _now() -> str:
     return datetime.now(UTC).isoformat()
 
 
+def _is_loopback(host: str) -> bool:
+    import ipaddress
+
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return host.lower() in ("localhost", "127.0.0.1", "::1")
+
+
+def _validate_base_url(base_url: str, name: str) -> None:
+    """Reject a provider base_url that would leak the API key over plaintext.
+
+    P1-018: custom endpoints must be https (or loopback http for local
+    models). Sending an API key to an arbitrary http:// host is refused.
+    """
+    if not base_url:
+        return
+    from urllib.parse import urlparse
+
+    parsed = urlparse(base_url)
+    if parsed.scheme not in ("http", "https"):
+        raise ValueError(
+            f"profile {name!r}: base_url must be http(s), got {parsed.scheme!r}"
+        )
+    if parsed.scheme == "http" and not _is_loopback(parsed.hostname or ""):
+        raise ValueError(
+            f"profile {name!r}: http base_url is only allowed for loopback "
+            f"(localhost); use https for {parsed.hostname!r} (P1-018)"
+        )
+
+
 @dataclass
 class ProviderProfile:
     """A single LLM provider profile."""
@@ -149,6 +180,7 @@ class ProviderConfigStore:
         return self.load()["active"]
 
     def add(self, profile: ProviderProfile, *, activate: bool = True) -> None:
+        _validate_base_url(profile.base_url, profile.name)
         data = self.load()
         data["profiles"][profile.name] = profile
         if activate or data["active"] is None:
@@ -163,6 +195,8 @@ class ProviderConfigStore:
         for key, value in fields.items():
             if value is not None and hasattr(profile, key):
                 setattr(profile, key, value)
+        if "base_url" in fields:
+            _validate_base_url(profile.base_url, profile.name)
         profile.updated_at = _now()
         self._save(data["profiles"], data["active"])
         return profile
