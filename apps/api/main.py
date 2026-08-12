@@ -37,7 +37,17 @@ from .routers import (
 
 
 async def ensure_database() -> None:
-    """Point the DB at a local SQLite file when nothing is configured yet."""
+    """Point the DB at a local SQLite file when nothing is configured yet.
+
+    P1-024: the SQLite fallback is DEV-ONLY — when ``APP_ENV=production`` a
+    missing ``DATABASE_URL`` is a hard startup error, never a silent fallback.
+    """
+    app_env = os.environ.get("APP_ENV", "development").lower()
+    if app_env == "production" and not os.environ.get("DATABASE_URL"):
+        raise RuntimeError(
+            "APP_ENV=production requires an explicit DATABASE_URL "
+            "(the SQLite fallback is dev-only, P1-024)"
+        )
     if not os.environ.get("DATABASE_URL") and db_session._engine is None:
         data_dir = os.path.join(os.getcwd(), config.DB_DIR)
         os.makedirs(data_dir, exist_ok=True)

@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
+import pytest
 import yaml
 
 COMPOSE = Path(__file__).resolve().parents[2] / "deploy" / "compose" / "docker-compose.yml"
@@ -57,3 +58,14 @@ def test_insecure_config_detector_warns_on_placeholder_db_password(monkeypatch, 
     with caplog.at_level(logging.WARNING, logger="personal_ai_os.config"):
         main_mod._warn_insecure_config()
     assert "placeholder password" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_production_requires_explicit_database_url(monkeypatch):
+    """P1-024 — APP_ENV=production with no DATABASE_URL fails startup."""
+    import apps.api.main as main_mod
+
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.setenv("APP_ENV", "production")
+    with pytest.raises(RuntimeError, match="DATABASE_URL"):
+        await main_mod.ensure_database()
