@@ -252,7 +252,10 @@ class HttpFetchConnector:
             },
             risk_level=3,
             side_effect=True,
-            destructive=True,  # DELETE is in the method set
+            # P1-013: not destructive-by-purpose (it is a general mutating
+            # request tool gated at R3/approval); a tool whose PRIMARY purpose
+            # is destruction would be destructive=True and R4.
+            destructive=False,
             external_write=True,
             idempotent=False,
             timeout_seconds=int(MAX_TIMEOUT),
