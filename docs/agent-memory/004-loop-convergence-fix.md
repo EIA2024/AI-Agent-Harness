@@ -117,37 +117,42 @@ len(state.get("tool_results") or []) >= MAX_TOOL_CALLS
 - 代码和测试已提交到 `cli-v2-upgrade`；
 - `main` 未修改；
 - 创建 Draft PR `#1`：`fix(runtime): make ReAct tool loops converge`，仅用于触发仓库现有 GitHub Actions；
-- PR 不得在本任务中 merge。
+- PR 不得在本任务中 merge；
+- GitHub Actions `CI` 已验证本分支最终代码：
+  - Python 3.12：`ruff` 成功，完整 `pytest` 步骤成功；
+  - Python 3.13：`ruff` 成功，完整 `pytest` 步骤成功。
 
-### 当前限制
+因此本次新增 convergence 代码、回归测试以及仓库既有测试均通过 CI 门禁。
 
-当前执行环境无法从容器直接 clone GitHub（DNS/network 不可用），因此无法在本地运行 `uv run pytest -q` / `ruff`。
+### 执行环境说明
 
-仓库现有 CI 只监听：
+当前模型执行环境无法从容器直接 clone GitHub（DNS/network 不可用），因此没有使用本地 `uv run pytest -q`；验证改由仓库原生 GitHub Actions 完成。
+
+仓库 CI 只监听：
 
 - push 到 `main`
 - 指向 `main` 的 pull request
 
 因此使用 Draft PR 触发 CI，同时保持 main 不动。
 
-在本文档提交时，GitHub 尚未返回该 HEAD 的 workflow/status 记录，所以**不能宣称 532+ 新测试已经全绿**。必须以 GitHub Actions 实际结果为准。
-
 ---
 
-## 5. 下一步验证顺序
+## 5. 剩余：真实模型复现
 
-1. 查看 Draft PR #1 的 Python 3.12 / 3.13 `ruff + pytest`；
-2. 如 CI 失败，只修复本次 convergence 相关回归，不顺手扩大范围；
-3. CI 全绿后重启 API 服务；
-4. 重新跑真实复现场景：
+自动化测试与静态检查已经通过。由于真实 API 服务不在当前可操作执行环境中，最后还需要在部署/本地服务上进行一次行为级复现：
+
+1. 重启 API 服务，使 runtime/prompt 变更生效；
+2. 重新跑：
    - “帮我看看原神现在最新版本是多少”
    - “帮我看看这个文件/目录”
-5. 验收重点不是“能否撞到 5 次上限”，而是：
+3. 验收重点不是“能否撞到 5 次上限”，而是：
    - 首次成功结果后是否直接总结；
    - 如果模型第一次重复，connector 是否仍只执行一次；
    - 第二次连续重复后是否立即回收 tools；
    - 最终回答是否使用已有成功结果；
    - 不得出现“工具无法调用”的错误归因。
+
+如果真实模型仍通过不断改变近似参数（例如不断换 URL）规避 exact-signature guard，再根据真实 run 证据增加“信息增益/同工具探索”诊断；不要预先把研究类任务粗暴限制成单次工具调用。
 
 ---
 
