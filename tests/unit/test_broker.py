@@ -570,3 +570,16 @@ async def test_capability_service_filters_owner_visibility():
     assert not caps.can_use("owner-b", "secret.get")
 
 
+
+
+async def test_result_data_size_is_bounded():
+    """P1-001 — a connector cannot stuff an unbounded data dict into state."""
+    big_data = {"entries": [{"x": "y" * 500} for _ in range(1000)]}
+    connector = FakeConnector(result=ToolResult.ok(data=big_data))
+    broker, registry, _ = make_broker(connector=connector, max_result_chars=2000)
+    await register_echo(broker, connector)
+    result = await broker.execute("fake.echo", {"message": "hi"}, ctx())
+    assert result.success
+    # the data was replaced by a bounded marker
+    assert result.data.get("truncated") is True
+    assert result.raw_size_bytes and result.raw_size_bytes > 0

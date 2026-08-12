@@ -303,9 +303,20 @@ class ToolBroker:
     # ------------------------------------------------------------------
 
     def _sanitize_result(self, result: ToolResult) -> ToolResult:
-        """Redact secrets from the result and truncate oversized text."""
+        """Redact secrets from the result and truncate oversized text/data."""
         if result.data is not None:
             result.data = LogSanitizer.sanitize_dict(result.data)
+            # P1-001: bound the structured data a connector can stuff into the
+            # result (a huge dict is a memory/context risk).
+            import json as _json
+
+            try:
+                encoded = _json.dumps(result.data, ensure_ascii=False)
+            except (TypeError, ValueError):
+                encoded = ""
+            if len(encoded) > self._max_result_chars:
+                result.data = {"truncated": True, "bytes": len(encoded)}
+                result.raw_size_bytes = len(encoded)
         if result.text:
             raw_len = len(result.text)
             result.text = LogSanitizer.sanitize(result.text)
