@@ -15,10 +15,12 @@ from sqlalchemy import (
     DateTime,
     Float,
     ForeignKey,
+    Index,
     Integer,
     String,
     Text,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
@@ -131,6 +133,16 @@ class Message(Base):
 
 class Run(Base):
     __tablename__ = "runs"
+    __table_args__ = (
+        # P1-009: at most one running run per session (partial unique index).
+        Index(
+            "uq_run_one_active_per_session",
+            "session_id",
+            unique=True,
+            sqlite_where=text("status = 'running'"),
+            postgresql_where=text("status = 'running'"),
+        ),
+    )
 
     id: Mapped[uuid.UUID] = _uuid_pk()
     owner_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"))
@@ -138,6 +150,10 @@ class Run(Base):
     session_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("sessions.id"))
     parent_run_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("runs.id"))
     status: Mapped[str] = mapped_column(String(32))
+    # P1-027: execution lease — who claimed this run and until when, so a crashed
+    # worker can be reclaimed instead of leaving the run permanently stuck.
+    lease_owner: Mapped[str | None] = mapped_column(String(64))
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     input: Mapped[dict] = mapped_column(JSON)
     state: Mapped[dict] = mapped_column(JSON, default=dict)
     model_usage: Mapped[dict] = mapped_column(JSON, default=dict)
@@ -162,6 +178,11 @@ class RunStep(Base):
 
 class ToolCall(Base):
     __tablename__ = "tool_calls"
+    # P1-011: a tool call with the same idempotency key must never be persisted
+    # twice (SQLite treats NULLs as distinct, so non-keyed calls are unaffected).
+    __table_args__ = (
+        UniqueConstraint("run_id", "idempotency_key", name="uq_toolcall_run_idem"),
+    )
 
     id: Mapped[uuid.UUID] = _uuid_pk()
     run_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("runs.id"))

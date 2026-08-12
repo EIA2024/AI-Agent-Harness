@@ -43,6 +43,10 @@ from personal_ai_os.policy_engine.approval import ApprovalNotPendingError
 
 logger = logging.getLogger(__name__)
 
+
+class SessionBusyError(Exception):
+    """P1-009 — a session already has a running run (serialized concurrency)."""
+
 _MAX_TOOL_RESULTS_PERSISTED = 50
 
 #: Token budget for the session's verbatim recent-message window (MemGPT
@@ -259,6 +263,20 @@ class RunRunner:
         started = _now()
 
         async with session_scope() as session:
+            # P1-009: default concurrency policy is SERIALIZED — a session may
+            # have at most one running run (backed by a partial unique index).
+            if session_uuid is not None:
+                busy = (
+                    await session.execute(
+                        select(Run.id).where(
+                            Run.session_id == session_uuid, Run.status == "running"
+                        ).limit(1)
+                    )
+                ).scalars().first()
+                if busy is not None:
+                    raise SessionBusyError(
+                        f"session {session_uuid} already has an active run {busy}"
+                    )
             session.add(
                 Run(
                     id=run_id,

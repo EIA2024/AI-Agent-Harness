@@ -46,3 +46,26 @@ async def test_runner_uses_persistent_checkpointer(tmp_path, monkeypatch):
     )
     # the compiled graph is not the in-memory default
     assert runner.compiled is not None
+
+
+@pytest.mark.asyncio
+async def test_session_serialized_concurrency_blocks_second_run():
+    """P1-009 — a session with a running run refuses a second one (409 path)."""
+    from sqlalchemy import select
+
+    from personal_ai_os.agent_runtime.runner import SessionBusyError
+    from personal_ai_os.db.models import Run, User
+    from personal_ai_os.db.session import session_scope
+    from tests.integration.test_vertical_slice import _make_session
+    from tests.integration.test_vertical_slice import build_stack as _bs
+
+    runner, *_ = await _bs([{"content": "hi"}])
+    async with session_scope() as s:
+        owner_id = (await s.execute(select(User))).scalars().first().id
+    session_id = await _make_session(owner_id)
+    # leave a run stuck in "running" (simulates a crashed/active run)
+    async with session_scope() as s:
+        s.add(Run(owner_id=owner_id, session_id=session_id, status="running", input={}))
+        await s.flush()
+    with pytest.raises(SessionBusyError):
+        await runner.start(session_id=session_id, owner_id=owner_id, user_input="second")
