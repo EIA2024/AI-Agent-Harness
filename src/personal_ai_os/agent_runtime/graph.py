@@ -79,6 +79,16 @@ class ToolArgumentParseError(ValueError):
     replaced with ``{}`` and executed.
     """
 
+
+class ModelStreamError(Exception):
+    """A model stream broke after producing output (P1-016).
+
+    Falling back to a full ``complete()`` call after deltas were already
+    streamed would silently duplicate cost and could yield a different
+    decision. Fail the run instead; the upper layer may retry with an
+    idempotency token.
+    """
+
 logger = logging.getLogger(__name__)
 
 #: Unbounded-autonomous-loop guard — maximum tool calls a single run may make
@@ -197,8 +207,19 @@ async def _model_call(deps: _Deps, state: dict, request: ModelRequest) -> ModelR
                     )
                 elif ev.type == "done":
                     usage = ev.usage
-        except Exception:  # fall back to non-streaming on any stream failure
-            logger.warning("Model streaming failed for run %s; retrying non-streaming", run_id, exc_info=True)
+        except Exception as exc:
+            if content_parts or thinking_parts:
+                # P1-016: the stream already produced output — silently re-calling
+                # complete() duplicates cost and can change the decision. Fail.
+                logger.error(
+                    "Model stream broke after producing output for run %s (%s)",
+                    run_id, exc,
+                )
+                raise ModelStreamError(
+                    f"model stream broke after producing output: {exc}"
+                ) from exc
+            # Failed before the first token → a plain complete() call is safe.
+            logger.warning("Model streaming failed before first token for run %s; retrying non-streaming", run_id, exc_info=True)
             return await deps.model_provider.complete(request)
         response = ModelResponse.from_stream(
             model=request.preferred_model or "model",
@@ -547,13 +568,11 @@ async def tool_request(state: AgentState, deps: _Deps) -> dict:
 
     run_key = str(run_uuid)
     tool_call_id = _tool_call_id(pending)
-    _push_tool_event(
-        run_key, "tool.started",
-        {"tool_call_id": tool_call_id, "tool_name": name},
-    )
     try:
         result = await deps.tool_broker.execute(name, arguments, ctx)
     except ApprovalRequiredError as exc:
+        # P1-030: the connector did NOT run — never emit tool.started before
+        # approval.required (started means "about to execute the connector").
         return {
             "status": "waiting_approval",
             "pending_approval": {
@@ -565,6 +584,11 @@ async def tool_request(state: AgentState, deps: _Deps) -> dict:
             "_cached_context": None,  # P0-001: approval state changed
         }
 
+    # The connector ran (no approval needed) — emit started, then completed/failed.
+    _push_tool_event(
+        run_key, "tool.started",
+        {"tool_call_id": tool_call_id, "tool_name": name},
+    )
     if result.success:
         _push_tool_event(
             run_key, "tool.completed",

@@ -90,3 +90,38 @@ async def test_session_list_has_metadata(cli_client):
         match = next(s for s in sessions if s.id == session.id)
         assert match.message_count is None or match.message_count >= 1
         assert match.active_run_id is not None
+
+
+@pytest.mark.asyncio
+async def test_approval_run_does_not_emit_tool_started():
+    """P1-030 — the connector never ran, so no tool.started before approval.required."""
+    from sqlalchemy import select
+
+    from personal_ai_os.agent_runtime import streams
+    from personal_ai_os.db.models import User
+    from personal_ai_os.db.session import session_scope
+    from tests.integration.test_vertical_slice import _make_session, build_stack
+
+    script = [
+        {"tool_calls": _tool_call("mail.send", {"to": "a@x.com", "subject": "s", "body": "b"})}
+    ]
+    runner, _, broker, *_ = await build_stack(script)
+    async with session_scope() as s:
+        owner_id = (await s.execute(select(User))).scalars().first().id
+    session_id = await _make_session(owner_id)
+
+    result = await runner.start_streaming(
+        session_id=session_id, owner_id=owner_id, user_input="发邮件"
+    )
+    queue = streams.get(result["id"])
+    assert queue is not None
+
+    events: list[str] = []
+    while True:
+        ev = await asyncio.wait_for(queue.get(), timeout=10)
+        events.append(ev["event"])
+        if ev["event"] in ("run.completed", "run.failed", "run.cancelled", "approval.required"):
+            break
+
+    assert "approval.required" in events
+    assert "tool.started" not in events, f"started must not precede approval: {events}"

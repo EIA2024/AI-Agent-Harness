@@ -324,3 +324,91 @@ async def test_missing_run_id_fails_fast():
     del initial["run_id"]
     with pytest.raises(ValueError, match="run_id"):
         await compiled.ainvoke(initial, cfg(uuid.uuid4()))
+
+
+async def test_stream_break_after_first_token_does_not_retry():
+    """P1-016 — a stream that broke mid-output must not trigger a second model call."""
+    from types import SimpleNamespace
+
+    from personal_ai_os.agent_runtime import streams
+    from personal_ai_os.agent_runtime.graph import ModelStreamError, _Deps, _model_call
+    from personal_ai_os.common.models import ModelRequest, ModelResponse
+
+    run_id = str(uuid.uuid4())
+    streams.register(run_id)
+    try:
+        class BrokenStream:
+            def __init__(self):
+                self.complete_calls = 0
+
+            async def stream(self, request):
+                yield SimpleNamespace(type="text_delta", text="partial")
+                raise RuntimeError("connection lost")
+
+            async def complete(self, request):
+                self.complete_calls += 1
+                return ModelResponse(content="retried", tool_calls=None, model="fake", provider="fake")
+
+        provider = BrokenStream()
+        deps = _Deps(
+            context_engine=None, model_provider=provider, tool_broker=None,
+            memory_store=None, classifier=None, planner=None,
+        )
+        state = {
+            "run_id": run_id, "owner_id": "o", "session_id": "s", "agent_id": None,
+            "user_input": "x", "messages": [], "context_items": [], "task": {},
+            "plan": [], "current_step": 0, "tool_results": [], "pending_approval": None,
+            "memory_candidates": [], "skill_candidates": [], "status": "intake",
+            "error": {}, "model_usage": {},
+        }
+        with pytest.raises(ModelStreamError):
+            await _model_call(
+                deps, state,
+                ModelRequest(purpose="assistant", messages=[{"role": "user", "content": "x"}]),
+            )
+        assert provider.complete_calls == 0  # NO silent retry
+    finally:
+        streams.unregister(run_id)
+
+
+async def test_stream_break_before_first_token_retries_non_streaming():
+    """P1-016 — failing before any delta may safely fall back to complete()."""
+
+    from personal_ai_os.agent_runtime import streams
+    from personal_ai_os.agent_runtime.graph import _Deps, _model_call
+    from personal_ai_os.common.models import ModelRequest, ModelResponse
+
+    run_id = str(uuid.uuid4())
+    streams.register(run_id)
+    try:
+        class BrokenStream:
+            def __init__(self):
+                self.complete_calls = 0
+
+            async def stream(self, request):
+                if False:
+                    yield None  # make this an async generator
+                raise RuntimeError("connection refused")
+
+            async def complete(self, request):
+                self.complete_calls += 1
+                return ModelResponse(content="ok", tool_calls=None, model="fake", provider="fake")
+
+        provider = BrokenStream()
+        deps = _Deps(
+            context_engine=None, model_provider=provider, tool_broker=None,
+            memory_store=None, classifier=None, planner=None,
+        )
+        state = {"run_id": run_id, "owner_id": "o", "session_id": "s", "agent_id": None,
+                 "user_input": "x", "messages": [], "context_items": [], "task": {},
+                 "plan": [], "current_step": 0, "tool_results": [], "pending_approval": None,
+                 "memory_candidates": [], "skill_candidates": [], "status": "intake",
+                 "error": {}, "model_usage": {}}
+        response = await _model_call(
+            deps, state,
+            ModelRequest(purpose="assistant", messages=[{"role": "user", "content": "x"}]),
+        )
+        assert provider.complete_calls == 1
+        assert response.content == "ok"
+    finally:
+        streams.unregister(run_id)
