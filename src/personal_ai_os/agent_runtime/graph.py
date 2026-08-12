@@ -165,8 +165,10 @@ async def _model_call(deps: _Deps, state: dict, request: ModelRequest) -> ModelR
         try:
             async for ev in stream_method(request):
                 if ev.type == "thinking_delta" and ev.text:
+                    # P0-008: raw chain-of-thought is never pushed to the public
+                    # SSE stream; it is only accumulated for the provider's own
+                    # replay protocol (reasoning_content on the tool call).
                     thinking_parts.append(ev.text)
-                    push_live(run_id, "thinking.delta", {"text": ev.text})
                 elif ev.type == "text_delta" and ev.text:
                     content_parts.append(ev.text)
                     push_live(run_id, "text.delta", {"text": ev.text})

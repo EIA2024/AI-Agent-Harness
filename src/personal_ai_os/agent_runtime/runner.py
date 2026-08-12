@@ -51,6 +51,28 @@ def _now() -> datetime:
     return datetime.now(UTC)
 
 
+def _strip_reasoning(state: dict) -> dict:
+    """Remove raw chain-of-thought from a state dict before persisting (P0-008).
+
+    ``reasoning_content`` (on tool-call frames, serialized tool results and
+    ``pending_tool_call``) and the top-level ``thinking`` are required by the
+    provider protocol DURING the run, but must never land in the public
+    ``Run.state``. Recursively removes every ``reasoning_content`` key.
+    """
+    stripped = dict(state)
+    stripped.pop("thinking", None)
+
+    def _clean(value: Any) -> Any:
+        if isinstance(value, dict):
+            return {k: _clean(v) for k, v in value.items() if k != "reasoning_content"}
+        if isinstance(value, list):
+            return [_clean(item) for item in value]
+        return value
+
+    stripped = {k: _clean(v) for k, v in stripped.items()}
+    return stripped
+
+
 def _coerce_uuid(value: Any) -> uuid.UUID:
     if isinstance(value, uuid.UUID):
         return value
@@ -561,7 +583,9 @@ class RunRunner:
             run = await session.get(Run, run_id)
             if run is None:
                 return
-            run.state = running
+            # P0-008: never persist raw chain-of-thought (reasoning_content on
+            # tool-call frames, top-level thinking) into the public Run.state.
+            run.state = _strip_reasoning(running)
             if running.get("model_usage"):
                 run.model_usage = running["model_usage"]
             run.status = status or running.get("status") or run.status
@@ -599,7 +623,10 @@ class RunRunner:
 
     async def _persist_tool_calls(self, session, run_id: uuid.UUID, running: dict) -> None:
         seen = self._persisted_tool_ids.setdefault(str(run_id), set())
-        for entry in (running.get("tool_results") or [])[-_MAX_TOOL_RESULTS_PERSISTED:]:
+        for raw_entry in (running.get("tool_results") or [])[-_MAX_TOOL_RESULTS_PERSISTED:]:
+            # P0-008: the serialized result embeds `tool_call` (with the
+            # provider's reasoning_content); never persist that to ToolCall.result.
+            entry = _strip_reasoning(raw_entry)
             entry_id = entry.get("id")
             if not entry_id or entry_id in seen:
                 continue
