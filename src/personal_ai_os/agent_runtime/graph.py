@@ -453,7 +453,7 @@ def route_after_decide(state: AgentState) -> str:
 async def plan(state: AgentState, deps: _Deps) -> dict:
     """Generate a plan for L2/L3 tasks before executing tools."""
     steps = await deps.planner.create_plan(state.get("user_input", ""), dict(state))
-    return {"plan": steps, "current_step": 0, "status": "planning"}
+    return {"plan": steps, "current_step": 0, "status": "planning", "_cached_context": None}
 
 
 async def tool_request(state: AgentState, deps: _Deps) -> dict:
@@ -498,6 +498,7 @@ async def tool_request(state: AgentState, deps: _Deps) -> dict:
                 "risk_level": exc.risk_level,
                 "reason": exc.reason,
             },
+            "_cached_context": None,  # P0-001: approval state changed
         }
 
     if result.success:
@@ -533,6 +534,7 @@ async def tool_request(state: AgentState, deps: _Deps) -> dict:
         "pending_tool_call": None,
         "pending_approval": None,
         "tool_results": existing + [_serialize_tool_result(result, pending, name, ctx, arguments, tool_trust)],
+        "_cached_context": None,  # P0-001: tool_results changed
     }
 
 
@@ -589,6 +591,7 @@ async def approval(state: AgentState, deps: _Deps) -> dict:
                 "usage": None,
             },
             "tool_results": list(state.get("tool_results") or []) + [rejected],
+            "_cached_context": None,  # P0-001: decision + tool_results changed
         }
 
     if decision.get("edited_arguments"):
@@ -635,6 +638,7 @@ async def approval(state: AgentState, deps: _Deps) -> dict:
         "pending_approval": None,
         "tool_results": list(state.get("tool_results") or [])
         + [_serialize_tool_result(result, pending, name, ctx, arguments, tool_trust)],
+        "_cached_context": None,  # P0-001: decision + tool_results changed
     }
 
 
@@ -651,7 +655,7 @@ async def observe(state: AgentState, deps: _Deps) -> dict:
     """Fold the latest tool result into the message history, then loop to decide."""
     tool_results = state.get("tool_results") or []
     if not tool_results:
-        return {"status": "observing"}
+        return {"status": "observing", "_cached_context": None}
     latest = tool_results[-1]
     messages = list(state.get("messages") or [])
     tool_call = latest.get("tool_call")
@@ -670,7 +674,9 @@ async def observe(state: AgentState, deps: _Deps) -> dict:
             "name": latest.get("tool_name"),
         }
     )
-    return {"status": "observing", "messages": messages}
+    # P0-001: messages changed → the cached context is stale; force a rebuild in
+    # the next decide, otherwise the model never sees the tool result and loops.
+    return {"status": "observing", "messages": messages, "_cached_context": None}
 
 
 async def respond(state: AgentState, deps: _Deps) -> dict:
@@ -709,6 +715,7 @@ async def respond(state: AgentState, deps: _Deps) -> dict:
         "final_response": content,
         "thinking": thinking,
         "model_usage": usage,
+        "_cached_context": None,  # P0-001: messages changed
     }
 
 
@@ -741,7 +748,7 @@ async def reflect(state: AgentState, deps: _Deps) -> dict:
                 break
         if len(candidates) >= 5:
             break
-    return {"status": "reflecting", "memory_candidates": candidates, "skill_candidates": []}
+    return {"status": "reflecting", "memory_candidates": candidates, "skill_candidates": [], "_cached_context": None}
 
 
 async def memory_commit(state: AgentState, deps: _Deps) -> dict:
@@ -762,7 +769,7 @@ async def memory_commit(state: AgentState, deps: _Deps) -> dict:
                 source_type=candidate.get("source_type", "conversation"),
             )
             await deps.memory_store.write(memory)
-    return {"status": "committing_memory"}
+    return {"status": "committing_memory", "_cached_context": None}
 
 
 def route_after_tool_request(state: AgentState) -> str:
