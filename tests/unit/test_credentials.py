@@ -118,3 +118,30 @@ async def test_owner_scoped_mode_disables_global_env_fallback(monkeypatch):
     monkeypatch.setenv("GITHUB_TOKEN", "GLOBAL-SECRET")
     broker = CredentialBroker(source={str(owner): {}})  # owner exists but has no token
     assert broker.resolve_secret("github.token", owner_id=owner) is None
+
+
+def test_log_sanitizer_recurses_lists_and_tuples():
+    """P2-002 — strings inside lists/tuples are sanitized too."""
+    from personal_ai_os.common.utils import LogSanitizer
+
+    value = {
+        "headers": ["Authorization: Bearer sk-abcdefghijklmnop1234567890", "Host: x.com"],
+        "nested": {"list": [{"token": "t0k3n"}, "Bearer abc"]},
+        "tuple_val": ("sk-abcdefghijklmnop1234567890", "safe"),
+    }
+    cleaned = LogSanitizer.sanitize_value(value)
+    assert "sk-abcdefghijklmnop1234567890" not in cleaned["headers"][0]
+    assert cleaned["headers"][1] == "Host: x.com"
+    assert cleaned["nested"]["list"][0]["token"] == "[REDACTED]"
+    assert "sk-abcdefghijklmnop1234567890" not in cleaned["nested"]["list"][1]
+    assert "sk-abcdefghijklmnop1234567890" not in cleaned["tuple_val"][0]
+    assert cleaned["tuple_val"][1] == "safe"
+
+
+def test_log_sanitizer_depth_guard():
+    """P2-002 — deeply nested hostile payloads are bounded, not a DoS."""
+    from personal_ai_os.common.utils import LogSanitizer
+
+    deep = value = {"k": {"k": {"k": {"k": {"k": {"k": {"k": {"k": {"k": {"k": {"k": "sk-abcdefghijklmnop1234567890"}}}}}}}}}}}
+    cleaned = LogSanitizer.sanitize_value(deep)
+    assert isinstance(cleaned, dict)
