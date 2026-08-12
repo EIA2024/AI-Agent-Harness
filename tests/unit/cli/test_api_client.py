@@ -183,3 +183,23 @@ async def test_stream_run_raises_transport_error():
     with pytest.raises(errors.TransportError):
         async for _ in client.stream_run("r1"):
             pass
+
+
+async def test_stream_gap_detected():
+    """P1-019 — a seq jump (dropped events) yields a gap warning event."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = (
+            "event: run.started\n"
+            'data: {"run_id": "r1", "seq": 1}\n'
+            "\n"
+            "event: text.delta\n"
+            'data: {"text": "hi", "seq": 4}\n'  # jumped from 1 → 4
+            "\n"
+        )
+        return httpx.Response(200, text=body)
+
+    client = _make_client(handler)
+    events = [e async for e in client.stream_run("r1")]
+    assert any(e.event == "stream.gap" for e in events), events
+    gap = next(e for e in events if e.event == "stream.gap")
+    assert gap.data["from_seq"] == 1 and gap.data["to_seq"] == 4

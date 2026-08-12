@@ -150,9 +150,15 @@ class AsyncAPIClient:
     # -- streaming ---------------------------------------------------------
 
     async def stream_run(self, run_id: str) -> AsyncIterator[ServerEvent]:
-        """Subscribe to ``GET /v1/runs/{id}/stream`` and yield decoded events."""
+        """Subscribe to ``GET /v1/runs/{id}/stream`` and yield decoded events.
+
+        P1-019: if a live queue overflowed server-side the envelope ``seq`` jumps
+        by more than one — the client detects the gap and yields a warning event
+        so callers never mistake a gappy stream for a complete one.
+        """
         decoder = SSEDecoder()
         headers = {"X-API-Key": self.api_key}
+        last_seq: int | None = None
         try:
             async with self._http.stream(
                 "GET", f"/v1/runs/{run_id}/stream", headers=headers
@@ -163,6 +169,26 @@ class AsyncAPIClient:
                     raise errors.classify(response.status_code, detail)
                 async for line in response.aiter_lines():
                     for event in decoder.feed_line(line):
+                        if event.malformed:
+                            yield event
+                            continue
+                        seq = event.data.get("seq")
+                        if (
+                            seq is not None
+                            and last_seq is not None
+                            and isinstance(seq, int)
+                            and seq != last_seq + 1
+                        ):
+                            yield ServerEvent(
+                                event="stream.gap",
+                                data={
+                                    "message": f"SSE gap detected: seq {last_seq} → {seq}",
+                                    "from_seq": last_seq,
+                                    "to_seq": seq,
+                                },
+                            )
+                        if seq is not None:
+                            last_seq = seq if isinstance(seq, int) else last_seq
                         yield event
                 for event in decoder.finish():
                     yield event
