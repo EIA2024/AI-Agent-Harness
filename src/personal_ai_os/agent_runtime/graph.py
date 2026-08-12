@@ -220,14 +220,44 @@ def _extract_tool_call_fields(pending: Any) -> tuple[str, dict]:
     return str(name), arguments
 
 
+_PREVIEW_MAX_ITEMS = 40
+_PREVIEW_MAX_CHARS = 2500
+
+
 def _tool_message_content(entry: dict) -> str:
-    text = entry.get("text")
-    if text:
-        return text
+    """Content the model sees for a tool result.
+
+    Prefers the human summary (``text``) but ALWAYS appends a bounded preview of
+    the structured ``data``. Otherwise a connector that summarizes in ``text``
+    (e.g. ``filesystem.list`` → ``"1859 entries"``) starves the model of the
+    actual content, so it cannot make progress and re-issues the same call until
+    the tool-call limit stops it.
+    """
+    text = entry.get("text") or ""
     data = entry.get("data")
-    if data:
-        return json.dumps(data, ensure_ascii=False)
-    return str(entry.get("error") or entry.get("content") or "")
+    if not data:
+        return text or str(entry.get("error") or entry.get("content") or "")
+    preview = _preview_tool_data(data)
+    if text:
+        return f"{text}\n{preview}"
+    return preview
+
+
+def _preview_tool_data(data: dict) -> str:
+    """JSON preview of a tool result, with list-heavy keys capped so large
+    results (directory listings, search hits, fetched content) stay within the
+    model context budget while still exposing real item names/values."""
+    preview: dict = {}
+    for key, value in data.items():
+        if isinstance(value, list) and value and isinstance(value[0], (dict, str)):
+            preview[key] = value[:_PREVIEW_MAX_ITEMS]
+            preview[f"{key}_total"] = len(value)
+        else:
+            preview[key] = value
+    encoded = json.dumps(preview, ensure_ascii=False)
+    if len(encoded) > _PREVIEW_MAX_CHARS:
+        encoded = encoded[:_PREVIEW_MAX_CHARS] + f" …[truncated, total {len(encoded)} chars]"
+    return encoded
 
 
 def _serialize_tool_result(result: Any, pending: Any, name: str, ctx: ToolExecutionContext,

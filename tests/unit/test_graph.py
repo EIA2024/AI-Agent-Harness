@@ -229,3 +229,38 @@ async def test_resume_with_edited_arguments():
     )
     executed_args = broker.calls[-1][1]
     assert executed_args == {"to": "new@x.com"}
+
+
+def test_tool_message_content_includes_data_preview():
+    """The model must see real content, not just the count summary."""
+    from personal_ai_os.agent_runtime.graph import _tool_message_content
+
+    entry = {
+        "text": "1859 entries",
+        "data": {
+            "path": ".",
+            "entries": [
+                {"name": "src", "path": "src", "is_dir": True},
+                {"name": "docs", "path": "docs", "is_dir": True},
+            ],
+        },
+    }
+    content = _tool_message_content(entry)
+    assert "1859 entries" in content
+    assert "src" in content and "docs" in content
+
+
+def test_tool_message_content_bounded_for_huge_data():
+    from personal_ai_os.agent_runtime.graph import _tool_message_content
+
+    entry = {"text": "2000 items", "data": {"entries": [{"x": "y" * 200} for _ in range(1000)]}}
+    content = _tool_message_content(entry)
+    assert len(content) < 5000
+    assert "truncated" in content
+
+
+def test_tool_message_content_without_data():
+    from personal_ai_os.agent_runtime.graph import _tool_message_content
+
+    assert _tool_message_content({"text": "ok"}) == "ok"
+    assert _tool_message_content({"error": "boom"}) == "boom"

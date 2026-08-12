@@ -27,6 +27,15 @@ _SENSITIVE_PATTERNS = [
 ]
 
 
+def _examples_summary(items: list[str], *, limit: int = 8) -> str:
+    """Human preview of the first few names, e.g. ``(e.g. src, docs, tests…)``."""
+    shown = items[:limit]
+    if not shown:
+        return ""
+    suffix = "…" if len(items) > limit else ""
+    return f" (e.g. {', '.join(shown)}{suffix})"
+
+
 class FilesystemConnector:
     """Exposes filesystem.read/list/search/write tools rooted at ``allowed_root``."""
 
@@ -255,7 +264,11 @@ class FilesystemConnector:
                     walk(real_full, depth + 1)
 
         walk(resolved, 0)
-        return ToolResult.ok(data={"path": path, "entries": entries}, text=f"{len(entries)} entries")
+        names = [e.get("name") for e in entries if isinstance(e, dict)]
+        return ToolResult.ok(
+            data={"path": path, "entries": entries},
+            text=f"{len(entries)} entries{_examples_summary(names)}",
+        )
 
     def _search(self, arguments: dict) -> ToolResult:
         path = arguments.get("path")
@@ -298,12 +311,15 @@ class FilesystemConnector:
                                 if len(matches) >= max_results:
                                     return ToolResult.ok(
                                         data={"path": path, "pattern": pattern, "matches": matches},
-                                        text=f"{len(matches)} match(es)",
+                                        text=f"{len(matches)} match(es)"
+                                        + _examples_summary([m.get('file') for m in matches if isinstance(m, dict)]),
                                     )
                 except OSError:
                     continue
         return ToolResult.ok(
-            data={"path": path, "pattern": pattern, "matches": matches}, text=f"{len(matches)} match(es)"
+            data={"path": path, "pattern": pattern, "matches": matches},
+            text=f"{len(matches)} match(es)"
+            + _examples_summary([m.get("file") for m in matches if isinstance(m, dict)]),
         )
 
     def _write(self, arguments: dict) -> ToolResult:

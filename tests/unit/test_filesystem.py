@@ -193,3 +193,21 @@ class TestSizeLimit:
         result = await connector.execute("filesystem.read", {"path": "big.txt"}, ctx())
         assert result.success is False
         assert "file too large" in result.error
+
+
+async def test_list_summary_includes_example_names(tmp_path):
+    (tmp_path / "alpha.txt").write_text("x")
+    (tmp_path / "beta.txt").write_text("y")
+    (tmp_path / "gamma.txt").write_text("z")
+    c = FilesystemConnector(allowed_root=str(tmp_path))
+    result = await c.execute("filesystem.list", {"path": "."}, ctx())
+    assert result.text == "3 entries (e.g. alpha.txt, beta.txt, gamma.txt)"
+
+
+async def test_search_summary_includes_example_files(tmp_path):
+    (tmp_path / "one.py").write_text("needle here\n")
+    (tmp_path / "two.py").write_text("nope\n")
+    c = FilesystemConnector(allowed_root=str(tmp_path))
+    result = await c.execute("filesystem.search", {"path": ".", "pattern": "needle"}, ctx())
+    assert "1 match(es)" in result.text
+    assert "one.py" in result.text
