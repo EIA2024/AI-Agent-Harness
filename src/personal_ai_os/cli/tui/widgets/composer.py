@@ -42,3 +42,8 @@ class Composer(TextArea):
 
     def set_disabled(self, disabled: bool) -> None:
         self.disabled = disabled
+        # Re-enabling loses focus (a disabled widget leaves the focus order);
+        # hand input focus back to the composer — unless a modal screen (e.g.
+        # the approval dialog) is on top, which owns the keyboard.
+        if not disabled and self.app.screen is self.screen:
+            self.focus()

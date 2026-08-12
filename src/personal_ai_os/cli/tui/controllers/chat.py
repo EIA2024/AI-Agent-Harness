@@ -44,12 +44,17 @@ class ChatController:
         self.state = initial_state(session_id=session_id)
         self._normalizer = Normalizer()
         self._stream_task: asyncio.Task | None = None
+        self._streaming = False
         self._last_refresh = 0.0
         self.pending_approval: dict[str, Any] | None = None
 
     @property
     def busy(self) -> bool:
-        return self._stream_task is not None and not self._stream_task.done()
+        # ``_streaming`` is a plain flag, not ``_stream_task.done()``: inside the
+        # stream task's own ``finally`` the task is not yet ``done()``, so a
+        # busy check at that moment would still be True and leave the composer
+        # disabled after the run ends.
+        return self._streaming
 
     async def ensure_session(self) -> None:
         if not self.state.session_id:
@@ -70,6 +75,7 @@ class ChatController:
             return True
         self.state.run_id = send.run_id
         self._refresh()
+        self._streaming = True
         self._stream_task = asyncio.create_task(self._stream(send.run_id))
         return True
 
@@ -84,6 +90,9 @@ class ChatController:
         except (APIError, TransportError) as exc:
             self.state.last_error = str(exc)
         finally:
+            # Clear the flag BEFORE the final repaint so the composer is
+            # re-enabled for the next prompt.
+            self._streaming = False
             self._refresh(force=True)
 
     async def _load_pending_approval(self) -> None:
@@ -148,6 +157,7 @@ class ChatController:
             # 409 (concurrent resume) we keep it so the modal can be retried.
             self.pending_approval = None
             if run_id:
+                self._streaming = True
                 self._stream_task = asyncio.create_task(self._stream(run_id))
         except (APIError, TransportError) as exc:
             self.state.last_error = str(exc)

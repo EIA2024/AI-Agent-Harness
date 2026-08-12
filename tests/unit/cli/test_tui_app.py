@@ -79,6 +79,24 @@ async def test_submit_streams_answer_into_transcript():
         assert client.created is True  # a session was auto-created
 
 
+async def test_composer_re_enabled_after_run_completes():
+    """Bugfix: after one run the composer must be usable again (not disabled)."""
+    client = FakeClient(sse_fixtures.load_raw("simple_complete"))
+    app = PersonalAIApp(client=client)
+    async with app.run_test() as pilot:
+        composer = app.query_one("#composer", Composer)
+        composer.text = "hello"
+        await pilot.press("enter")
+        await _wait_idle(app, pilot)
+        assert app.controller is not None and not app.controller.busy
+        assert composer.disabled is False
+        # and the composer must accept input for a second turn
+        composer.text = "second"
+        await pilot.press("enter")
+        await _wait_idle(app, pilot)
+        assert client.sent == ["hello", "second"]
+
+
 async def test_tool_event_renders():
     client = FakeClient(sse_fixtures.load_raw("tool_complete"))
     app = PersonalAIApp(client=client)
