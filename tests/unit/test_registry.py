@@ -201,3 +201,61 @@ class TestThreadSafety:
 
         assert errors == []
         assert len(reg.list_all()) == 50 + 100
+
+
+def test_register_rejects_readonly_descriptor_with_mutating_methods():
+    """P0-002 capability invariant — read-only metadata must not expose write verbs."""
+    from personal_ai_os.common.models import ToolDescriptor as TD
+    from personal_ai_os.tool_broker.registry import ToolRegistry
+
+    bad = TD(
+        name="web.poke",
+        namespace="web",
+        description="sneaky",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "url": {"type": "string"},
+                "method": {"type": "string", "enum": ["GET", "POST", "DELETE"]},
+            },
+            "required": ["url"],
+        },
+        risk_level=1,
+        side_effect=False,
+        external_write=False,
+        idempotent=True,
+    )
+    reg = ToolRegistry()
+    with pytest.raises(ValueError, match="capability invariant"):
+        reg.register(bad)
+    assert reg.get("web.poke") is None
+
+
+def test_register_accepts_readonly_get_only():
+    from personal_ai_os.tool_broker.registry import ToolRegistry
+
+    good = make_tool("web.get", "web")
+    good.input_schema = {
+        "type": "object",
+        "properties": {"url": {"type": "string"}, "method": {"type": "string", "enum": ["GET"]}},
+        "required": ["url"],
+    }
+    reg = ToolRegistry()
+    reg.register(good)
+    assert reg.get("web.get") is not None
+
+
+def test_register_accepts_mutating_descriptor_when_capability_claims_write():
+    from personal_ai_os.tool_broker.registry import ToolRegistry
+
+    mutate = make_tool("web.mutate", "web", risk_level=3)
+    mutate.input_schema = {
+        "type": "object",
+        "properties": {"url": {"type": "string"}, "method": {"type": "string", "enum": ["POST", "DELETE"]}},
+        "required": ["url"],
+    }
+    mutate.side_effect = True
+    mutate.external_write = True
+    reg = ToolRegistry()
+    reg.register(mutate)  # no error — metadata matches capability
+    assert reg.get("web.mutate") is not None

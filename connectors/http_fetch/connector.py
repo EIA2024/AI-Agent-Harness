@@ -121,9 +121,18 @@ def html_to_text(raw: str, max_chars: int = 8000) -> str:
 
 
 class HttpFetchConnector:
-    """Exposes the read-only ``http_fetch.fetch`` tool."""
+    """HTTP tools: read-only ``http_fetch.fetch`` + mutating ``http_request.mutate``.
+
+    P0-002: side-effecting HTTP verbs must NOT ride on a read-only descriptor.
+    ``fetch`` is GET/HEAD only (R1, auto-allowed); POST/PUT/PATCH/DELETE live on
+    ``http_request.mutate`` (R3 → requires approval), so an agent can never
+    silently write/delete to an external service without going through policy.
+    """
 
     connector_name = "http_fetch"
+
+    _READ_METHODS = ("GET", "HEAD")
+    _MUTATE_METHODS = ("POST", "PUT", "PATCH", "DELETE")
 
     def __init__(
         self,
@@ -140,13 +149,14 @@ class HttpFetchConnector:
         self.allow_private = allow_private
         self._transport = transport
 
-    def _build_descriptor(self) -> ToolDescriptor:
+    def _read_descriptor(self) -> ToolDescriptor:
         return ToolDescriptor(
             name="http_fetch.fetch",
             namespace="http_fetch",
             description=(
-                "Fetch a URL and return the HTTP status code plus response body text. "
-                "Read-only; redirects are not followed and private/loopback addresses are blocked."
+                "Fetch a URL with a read-only HTTP method (GET/HEAD) and return status + body text. "
+                "Redirects are not followed; private/loopback addresses are blocked. "
+                "For POST/PUT/PATCH/DELETE use http_request.mutate."
             ),
             input_schema={
                 "type": "object",
@@ -154,15 +164,15 @@ class HttpFetchConnector:
                     "url": {"type": "string", "description": "Absolute http(s) URL to fetch"},
                     "method": {
                         "type": "string",
-                        "enum": ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD"],
+                        "enum": ["GET", "HEAD"],
                         "default": "GET",
+                        "description": "Read-only methods only",
                     },
                     "headers": {
                         "type": "object",
                         "additionalProperties": {"type": "string"},
                         "default": {},
                     },
-                    "body": {"type": "string", "default": None},
                     "timeout": {"type": "number", "minimum": 0.1, "maximum": MAX_TIMEOUT, "default": DEFAULT_TIMEOUT},
                 },
                 "required": ["url"],
@@ -184,12 +194,51 @@ class HttpFetchConnector:
             idempotent=True,
             timeout_seconds=int(MAX_TIMEOUT),
             retry_policy="once",
-            tags=["http", "web", "fetch"],
+            tags=["http", "web", "fetch", "read"],
+            result_trust="untrusted_web",
+        )
+
+    def _mutate_descriptor(self) -> ToolDescriptor:
+        return ToolDescriptor(
+            name="http_request.mutate",
+            namespace="http_request",
+            description=(
+                "Send a side-effecting HTTP request (POST/PUT/PATCH/DELETE) to a URL. "
+                "Requires approval (R3); use http_fetch.fetch for read-only GET/HEAD."
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string", "description": "Absolute http(s) URL"},
+                    "method": {
+                        "type": "string",
+                        "enum": ["POST", "PUT", "PATCH", "DELETE"],
+                        "default": "POST",
+                    },
+                    "headers": {
+                        "type": "object",
+                        "additionalProperties": {"type": "string"},
+                        "default": {},
+                    },
+                    "body": {"type": "string", "default": None},
+                    "timeout": {"type": "number", "minimum": 0.1, "maximum": MAX_TIMEOUT, "default": DEFAULT_TIMEOUT},
+                },
+                "required": ["url"],
+                "additionalProperties": False,
+            },
+            risk_level=3,
+            side_effect=True,
+            destructive=True,  # DELETE is in the method set
+            external_write=True,
+            idempotent=False,
+            timeout_seconds=int(MAX_TIMEOUT),
+            retry_policy="none",
+            tags=["http", "web", "write"],
             result_trust="untrusted_web",
         )
 
     async def list_tools(self) -> list[ToolDescriptor]:
-        return [self._build_descriptor()]
+        return [self._read_descriptor(), self._mutate_descriptor()]
 
     # ------------------------------------------------------------------
     # Security checks
@@ -226,7 +275,23 @@ class HttpFetchConnector:
                 error=f"refusing to fetch private/loopback address: {host}", error_code="SSRF_BLOCKED",
             )
 
+        short = tool.split(".")[-1] if "." in tool else tool
         method = str(arguments.get("method", "GET")).upper()
+        if short == "fetch":
+            if method not in self._READ_METHODS:
+                return ToolResult.fail(
+                    error=f"http_fetch.fetch is read-only; method {method} not allowed — use http_request.mutate",
+                    error_code="HTTP_METHOD_NOT_ALLOWED",
+                )
+        elif short == "mutate":
+            if method not in self._MUTATE_METHODS:
+                return ToolResult.fail(
+                    error=f"http_request.mutate requires a mutating method; got {method}",
+                    error_code="HTTP_METHOD_NOT_ALLOWED",
+                )
+        else:
+            return ToolResult.fail(error=f"unknown http tool: {tool}", error_code="UNKNOWN_TOOL")
+
         headers = arguments.get("headers") or {}
         body = arguments.get("body")
         timeout = min(float(arguments.get("timeout", self.default_timeout)), MAX_TIMEOUT)

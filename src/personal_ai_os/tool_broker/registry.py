@@ -24,6 +24,34 @@ def _is_awaitable(value) -> bool:
     return inspect.isawaitable(value)
 
 
+# HTTP verbs that mutate remote state (P0-002 capability invariant).
+_MUTATING_HTTP_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
+
+
+def _validate_capability_invariants(tool: ToolDescriptor) -> None:
+    """Reject capability metadata that contradicts the tool's declared schema.
+
+    P0-002: a descriptor claiming read-only (``side_effect=False``,
+    ``external_write=False``) must not expose mutating HTTP verbs in its
+    ``method`` enum — otherwise the policy layer auto-allows a remote
+    write/delete (R1 → no approval).
+    """
+    if tool.side_effect or tool.external_write:
+        return  # not claiming read-only; nothing to contradict
+    schema = tool.input_schema or {}
+    properties = schema.get("properties") if isinstance(schema, dict) else None
+    method_prop = properties.get("method") if isinstance(properties, dict) else None
+    enum = method_prop.get("enum") if isinstance(method_prop, dict) else None
+    if enum:
+        mutating = _MUTATING_HTTP_METHODS.intersection(e.upper() for e in enum)
+        if mutating:
+            raise ValueError(
+                f"capability invariant violated for {tool.name!r}: read-only metadata "
+                f"(side_effect=False, external_write=False) but schema allows mutating "
+                f"HTTP methods {sorted(mutating)}"
+            )
+
+
 async def _coerce_tools(value):
     """list_tools() is declared async on the Connector Protocol, but allow
     synchronous implementations too (FakeConnectors in tests)."""
@@ -46,7 +74,12 @@ class ToolRegistry:
 
     def register(self, tool: ToolDescriptor) -> None:
         """Register a tool. Idempotent: re-registering the same name is a no-op
-        that overwrites the previous descriptor and logs a warning."""
+        that overwrites the previous descriptor and logs a warning.
+
+        Raises ``ValueError`` when the descriptor's capability metadata
+        contradicts its schema (P0-002 capability invariants).
+        """
+        _validate_capability_invariants(tool)
         with self._lock:
             existing = self._tools.get(tool.name)
             if existing is not None:

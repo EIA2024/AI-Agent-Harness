@@ -28,7 +28,7 @@ def ok_handler(request: httpx.Request) -> httpx.Response:
 async def test_list_tools():
     connector = HttpFetchConnector()
     tools = await connector.list_tools()
-    assert len(tools) == 1
+    assert len(tools) == 2  # read fetch + mutating request (P0-002)
     tool = tools[0]
     assert tool.name == "http_fetch.fetch"
     assert tool.risk_level == 1
@@ -49,7 +49,8 @@ class TestNormalFetch:
         assert result.truncated is False
 
     @pytest.mark.asyncio
-    async def test_post_with_body(self):
+    async def test_post_with_body_via_mutate(self):
+        """P0-002 — side-effecting verbs live on http_request.mutate, not fetch."""
         def handler(request: httpx.Request) -> httpx.Response:
             assert request.method == "POST"
             assert request.read() == b"payload"
@@ -57,12 +58,52 @@ class TestNormalFetch:
 
         connector = HttpFetchConnector(transport=mock_transport(handler))
         result = await connector.execute(
-            "http_fetch.fetch",
+            "http_request.mutate",
             {"url": "https://example.com/submit", "method": "POST", "body": "payload"},
             ctx(),
         )
         assert result.success
         assert result.data["status_code"] == 201
+
+    @pytest.mark.asyncio
+    async def test_fetch_rejects_post(self):
+        """P0-002 — the read-only tool must refuse a mutating method."""
+        def handler(request: httpx.Request) -> httpx.Response:
+            raise AssertionError("fetch must not send POST")
+
+        connector = HttpFetchConnector(transport=mock_transport(handler))
+        result = await connector.execute(
+            "http_fetch.fetch",
+            {"url": "https://example.com/submit", "method": "POST", "body": "payload"},
+            ctx(),
+        )
+        assert result.success is False
+        assert result.error_code == "HTTP_METHOD_NOT_ALLOWED"
+
+    @pytest.mark.asyncio
+    async def test_mutate_rejects_get(self):
+        """P0-002 — the mutating tool must refuse a read-only method."""
+        connector = HttpFetchConnector(transport=mock_transport(ok_handler))
+        result = await connector.execute(
+            "http_request.mutate",
+            {"url": "https://example.com/x", "method": "GET"},
+            ctx(),
+        )
+        assert result.success is False
+        assert result.error_code == "HTTP_METHOD_NOT_ALLOWED"
+
+    @pytest.mark.asyncio
+    async def test_list_tools_exposes_both(self):
+        connector = HttpFetchConnector(transport=mock_transport(ok_handler))
+        tools = await connector.list_tools()
+        by_name = {t.name: t for t in tools}
+        assert "http_fetch.fetch" in by_name
+        assert "http_request.mutate" in by_name
+        assert by_name["http_fetch.fetch"].risk_level == 1
+        assert by_name["http_fetch.fetch"].side_effect is False
+        assert by_name["http_request.mutate"].risk_level == 3
+        assert by_name["http_request.mutate"].side_effect is True
+        assert by_name["http_request.mutate"].external_write is True
 
     @pytest.mark.asyncio
     async def test_custom_headers_passed(self):
