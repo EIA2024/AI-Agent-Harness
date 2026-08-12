@@ -15,7 +15,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from personal_ai_os.cli.api.sse import ServerEvent
-from personal_ai_os.cli.domain.events import UIEvent, UIEventType, ui_event
+from personal_ai_os.cli.domain.events import SCHEMA_VERSION, UIEvent, UIEventType, ui_event
 
 # Replay emits raw LangGraph node names as event names (live does not).
 _REPLAY_NODE_EVENTS = {
@@ -60,6 +60,24 @@ class Normalizer:
         payload = dict(server_event.data or {})
         if run_id is None:
             run_id = _coerce_run_id(payload)
+
+        # P2-005: an envelope from a NEWER server than we understand must not be
+        # silently mis-parsed — surface a version warning instead.
+        envelope_version = payload.get("schema_version", 1)
+        if envelope_version > SCHEMA_VERSION:
+            return ui_event(
+                UIEventType.WARNING,
+                {
+                    "message": (
+                        f"server event schema_version {envelope_version} is newer "
+                        f"than the client supports ({SCHEMA_VERSION})"
+                    ),
+                    "event": name,
+                },
+                run_id=run_id,
+                ts=ts,
+                seq=seq,
+            )
 
         handler = getattr(self, f"_on_{name.replace('.', '_')}", None)
         if handler is not None:

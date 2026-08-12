@@ -63,6 +63,10 @@ def _make_engine(url: str) -> AsyncEngine:
         def _set_sqlite_pragma(dbapi_connection, connection_record):  # noqa: ANN001
             cursor = dbapi_connection.cursor()
             cursor.execute("PRAGMA foreign_keys=ON")
+            # P2-003: WAL + busy timeout make SQLite tolerable for dev
+            # concurrency (single-process only; prod must use Postgres).
+            cursor.execute("PRAGMA journal_mode=WAL")
+            cursor.execute("PRAGMA busy_timeout=5000")
             cursor.close()
 
         return engine

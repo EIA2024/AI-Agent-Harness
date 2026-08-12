@@ -106,7 +106,7 @@ async def test_l2_task_generates_plan_before_tool():
     assert result["task"]["level"] == "L2"
     assert 2 <= len(result["plan"]) <= 4
     assert result["plan"][0]["id"].startswith("step-")
-    assert result["plan"][0]["status"] == "pending"
+    assert result["plan"][0]["status"] == "done"  # P1-029: executed step
     assert result["tool_results"][0]["tool_name"] == "search"
     assert result["final_response"] == "计划完成"
 
@@ -431,3 +431,20 @@ def test_result_trust_fails_closed_when_unknown():
         tool_trust="trusted_tool",
     )
     assert trusted["trust"] == "trusted_tool"
+
+
+async def test_plan_steps_mark_done_as_executed():
+    """P1-029 — plan steps transition pending→done and current_step advances."""
+    compiled, provider, broker = build_compiled(
+        [
+            {"content": None, "tool_calls": [tool_call("search", {"q": "project"})]},
+            {"content": "计划完成", "tool_calls": None},
+        ]
+    )
+    initial = make_initial("帮我整理这个项目并写学习指南")
+    result = await compiled.ainvoke(initial, cfg(initial["run_id"]))
+    assert result["task"]["level"] == "L2"
+    assert result["plan"]
+    # P1-029: the executed step is marked done and current_step advanced
+    assert result["plan"][0]["status"] == "done"
+    assert result["current_step"] >= 1

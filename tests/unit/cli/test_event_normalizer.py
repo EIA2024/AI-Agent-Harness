@@ -100,3 +100,15 @@ def test_server_error_event_maps_to_error():
     events = _events('event: error\ndata: {"detail": "Run not found"}\n\n')
     assert events[0].type == UIEventType.ERROR
     assert events[0].payload["message"] == "Run not found"
+
+
+def test_newer_schema_version_warns_not_misparsed():
+    """P2-005 — a v2 envelope is surfaced as a version warning, not misparsed."""
+    from personal_ai_os.cli.api.sse import ServerEvent
+
+    normalizer = Normalizer()
+    event = normalizer.normalize(
+        ServerEvent(event="run.started", data={"schema_version": 99, "status": "running"})
+    )
+    assert event.type == UIEventType.WARNING
+    assert "99" in event.payload["message"]

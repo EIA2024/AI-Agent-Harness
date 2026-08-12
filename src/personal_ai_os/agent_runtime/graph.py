@@ -735,8 +735,23 @@ async def execute(state: AgentState, deps: _Deps) -> dict:
 
     Kept as a distinct node so the graph topology matches the blueprint and so
     the runner has a clean point to persist a ``RunStep`` for tool execution.
+
+    P1-029: the plan is an execution constraint — each step transitions
+    ``pending → done`` as it is executed, and ``current_step`` advances so the
+    model sees live plan progress instead of a static display.
     """
-    return {"status": "executing_tool", "current_step": (state.get("current_step") or 0) + 1}
+    plan = list(state.get("plan") or [])
+    step = state.get("current_step", 0)
+    if plan and 0 <= step < len(plan) and isinstance(plan[step], dict):
+        current = dict(plan[step])
+        current["status"] = "done"
+        plan[step] = current
+    return {
+        "status": "executing_tool",
+        "current_step": step + 1,
+        "plan": plan,
+        "_cached_context": None,  # P0-001: plan/step changed
+    }
 
 
 async def observe(state: AgentState, deps: _Deps) -> dict:
