@@ -72,6 +72,23 @@ def _tool_call_name(pending) -> str:  # noqa: ANN001
     return ""
 
 
+def _same_signature(name: str, arguments: dict) -> str:
+    """Stable identity of a tool call (review §B): tool name + canonical args."""
+    return f"{name}:{json.dumps(arguments, sort_keys=True, ensure_ascii=False)}"
+
+
+def _find_prior_success(state: dict, name: str, arguments: dict) -> dict | None:
+    """Return the most recent SUCCESSFUL tool result with the exact same
+    signature, or None. Used to block repeated side-effecting calls."""
+    sig = _same_signature(name, arguments)
+    for entry in reversed(state.get("tool_results") or []):
+        if entry.get("success") and _same_signature(
+            entry.get("tool_name", ""), entry.get("arguments") or {}
+        ) == sig:
+            return entry
+    return None
+
+
 class ToolArgumentParseError(ValueError):
     """The LLM emitted an invalid ``arguments`` JSON for a tool call.
 
@@ -565,6 +582,33 @@ async def tool_request(state: AgentState, deps: _Deps) -> dict:
         idempotency_key=idempotency_key(str(run_uuid), state.get("current_step", 0), name, arguments),
     )
     existing = list(state.get("tool_results") or [])
+
+    # Review §B: the EXACT same call already succeeded earlier in this run — do
+    # NOT re-execute a (possibly side-effecting) tool. Feed the model an explicit
+    # notice so it uses the existing result or changes its approach instead of
+    # burning tool slots on identical repeats.
+    prior = _find_prior_success(state, name, arguments)
+    if prior is not None:
+        summary = str(prior.get("text") or prior.get("error") or "")[:120]
+        blocked = {
+            "id": str(uuid.uuid4()),
+            "tool_name": name,
+            "tool_call_id": _tool_call_id(pending),
+            "tool_call": pending,
+            "success": False,
+            "error": (
+                f"工具 {name} 的这组参数此前已成功执行（结果：{summary or '同上'}）。"
+                "请勿重复相同调用；使用已有结果，或改用 search / 更窄路径 / 不同参数。"
+            ),
+            "error_code": "TOOL_REPEAT_BLOCKED",
+            "arguments": arguments,
+        }
+        return {
+            "status": "executing_tool",
+            "pending_tool_call": None,
+            "tool_results": existing + [blocked],
+            "_cached_context": None,  # P0-001: tool_results changed
+        }
 
     run_key = str(run_uuid)
     tool_call_id = _tool_call_id(pending)

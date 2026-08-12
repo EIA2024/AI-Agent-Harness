@@ -448,3 +448,22 @@ async def test_plan_steps_mark_done_as_executed():
     # P1-029: the executed step is marked done and current_step advanced
     assert result["plan"][0]["status"] == "done"
     assert result["current_step"] >= 1
+
+
+async def test_identical_successful_call_is_blocked_not_repeated():
+    """Review §B — a repeated same-signature call must NOT re-execute the tool."""
+    same = tool_call("search", {"q": "python"})
+    compiled, provider, broker = build_compiled(
+        [
+            {"content": None, "tool_calls": [same]},
+            {"content": None, "tool_calls": [same]},  # identical repeat
+            {"content": "结果如上", "tool_calls": None},
+        ]
+    )
+    initial = make_initial("查 python")
+    result = await compiled.ainvoke(initial, cfg(initial["run_id"]))
+
+    assert len(broker.calls) == 1, "the connector must run only once"
+    blocked = [t for t in result["tool_results"] if t.get("error_code") == "TOOL_REPEAT_BLOCKED"]
+    assert blocked, "the repeated call must be surfaced as a repeat-block"
+    assert "请勿重复" in blocked[0]["error"]
