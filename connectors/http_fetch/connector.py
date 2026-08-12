@@ -75,6 +75,30 @@ def _resolve_private(host: str) -> bool:
     return False
 
 
+def _resolves_to_mixed_private_public(host: str) -> bool:
+    """True when a hostname resolves to BOTH private and public addresses.
+
+    P1-012: a mix is a strong DNS-rebinding signal (the name answers privately
+    to us and publicly to the upstream) — block rather than let a single
+    resolution-time check be raced.
+    """
+    if host.lower() == "localhost":
+        return True
+    try:
+        ipaddress.ip_address(host)
+    except ValueError:
+        pass
+    else:
+        return False  # an IP literal is a single, pinned address
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except OSError:
+        return False
+    seen_private = any(_is_private_ip(info[4][0]) for info in infos)
+    seen_public = any(not _is_private_ip(info[4][0]) for info in infos)
+    return seen_private and seen_public
+
+
 class _TextExtractor(HTMLParser):
     """Pulls readable text out of HTML, dropping script/style/noscript content."""
 
@@ -273,6 +297,13 @@ class HttpFetchConnector:
             logger.warning("http_fetch: blocking SSRF target %r", host)
             return ToolResult.fail(
                 error=f"refusing to fetch private/loopback address: {host}", error_code="SSRF_BLOCKED",
+            )
+        if not self.allow_private and _resolves_to_mixed_private_public(host):
+            # P1-012: DNS-rebinding signal — resolves to private AND public.
+            logger.warning("http_fetch: blocking mixed-resolution host %r (DNS rebinding?)", host)
+            return ToolResult.fail(
+                error=f"refusing to fetch host with mixed private/public resolution: {host}",
+                error_code="SSRF_BLOCKED",
             )
 
         short = tool.split(".")[-1] if "." in tool else tool

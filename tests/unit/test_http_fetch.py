@@ -246,3 +246,26 @@ def test_html_to_text_strips_markup():
     assert "style" not in text and "color:red" not in text
     assert "标题" in text and "第一段 & 内容" in text and "项目一" in text
     assert text.startswith("标题") or "标题" in text
+
+
+def test_mixed_private_public_resolution_is_rebinding_signal(monkeypatch):
+    """P1-012 — a hostname resolving to private AND public is blocked."""
+    from connectors.http_fetch.connector import _resolves_to_mixed_private_public
+
+    def mixed(host, port=None, *a, **k):
+        return [(2, 1, 6, "", ("10.0.0.5", 0)), (2, 1, 6, "", ("93.184.216.34", 0))]
+
+    monkeypatch.setattr("socket.getaddrinfo", mixed)
+    assert _resolves_to_mixed_private_public("rebind.example") is True
+
+    def only_public(host, port=None, *a, **k):
+        return [(2, 1, 6, "", ("93.184.216.34", 0))]
+
+    monkeypatch.setattr("socket.getaddrinfo", only_public)
+    assert _resolves_to_mixed_private_public("rebind.example") is False
+
+    def only_private(host, port=None, *a, **k):
+        return [(2, 1, 6, "", ("10.0.0.5", 0))]
+
+    monkeypatch.setattr("socket.getaddrinfo", only_private)
+    assert _resolves_to_mixed_private_public("rebind.example") is False  # covered by _resolve_private
