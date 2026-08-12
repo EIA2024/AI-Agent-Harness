@@ -272,7 +272,17 @@ class ContextEngine:
             if isinstance(m, dict) and m.get("role") in ("user", "assistant", "system", "tool")
         ]
         budget_total = budget.token_limit("conversation") + budget.token_limit("tool_results")
-        items.extend(self._fit_tail(kept[-10:], budget_total))
+
+        # Loop-hardening: the user's actual request MUST survive a long tool
+        # loop. A fixed 10-message window silently dropped it once the loop
+        # exceeded 10 messages — the model then had no instruction to conclude
+        # and just kept re-issuing tool calls. Always retain the last user
+        # message, and let the token budget (not a hard count) trim the tail.
+        user_msgs = [m for m in kept if m.get("role") == "user"]
+        tail = [m for m in kept if m.get("role") != "user"]
+        if user_msgs:
+            items.append(user_msgs[-1])
+        items.extend(self._fit_tail(tail[-30:], budget_total))
         return items
 
     def _tier4_tool_results(self, state: dict, budget: ContextBudget) -> list[dict]:

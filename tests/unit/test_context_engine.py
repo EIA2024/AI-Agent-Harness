@@ -123,17 +123,25 @@ async def test_build_assembles_four_tiers():
     assert built["messages"][-1]["content"] == "帮我总结上周的工作"
 
 
-async def test_conversation_sliding_window_last_10():
+async def test_conversation_keeps_last_user_and_tail_window():
     engine = make_engine(max_tokens=100000)
     history = [{"role": "user", "content": f"msg-{i}"} for i in range(20)]
     built = await engine.build({"user_input": "现在", "messages": history})
     history_msgs = [m for m in built["messages"] if m["content"].startswith("msg-")]
-    # only the last 10 history messages are kept, newest included
-    assert "msg-19" in history_msgs[-1]["content"]
-    assert len(history_msgs) == 10
-    assert "msg-0" not in history_msgs[0]["content"]
-    # current user input is the final message
+    # the LAST user message always survives; the current user_input is appended last
+    assert history_msgs[-1]["content"] == "msg-19"
     assert built["messages"][-1]["content"] == "现在"
+
+
+async def test_long_tool_loop_preserves_user_request():
+    """Loop bugfix — a >10-message tool loop must keep the user's request."""
+    engine = make_engine(max_tokens=16000)
+    history = [{"role": "user", "content": "帮我看看文件"}]
+    for i in range(8):
+        history.append({"role": "assistant", "content": None, "tool_calls": [{"id": f"c{i}"}]})
+        history.append({"role": "tool", "content": f"结果-{i}", "tool_call_id": f"c{i}"})
+    built = await engine.build({"user_input": "帮我看看文件", "messages": history})
+    assert any(m.get("content") == "帮我看看文件" for m in built["messages"])
 
 
 # ---------------------------------------------------------------------------
