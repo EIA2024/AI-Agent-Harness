@@ -259,3 +259,29 @@ def test_register_accepts_mutating_descriptor_when_capability_claims_write():
     reg = ToolRegistry()
     reg.register(mutate)  # no error — metadata matches capability
     assert reg.get("web.mutate") is not None
+
+
+def test_capability_validator_enforces_risk_ceilings():
+    """P1-013 — destructive→R4, external write→R3+, local side effect→R2+."""
+    from personal_ai_os.tool_broker.registry import ToolRegistry
+
+    destructive = make_tool("danger.rm", "danger", risk_level=1)
+    destructive.destructive = True
+    with pytest.raises(ValueError, match="R4"):
+        ToolRegistry().register(destructive)
+
+    external = make_tool("web.push", "web", risk_level=1)
+    external.side_effect = True
+    external.external_write = True
+    with pytest.raises(ValueError, match="R3"):
+        ToolRegistry().register(external)
+
+    local_write = make_tool("fs.write", "fs", risk_level=1)
+    local_write.side_effect = True
+    with pytest.raises(ValueError, match="R2"):
+        ToolRegistry().register(local_write)
+
+    # a compliant side-effecting tool passes
+    ok = make_tool("fs.write", "fs", risk_level=2)
+    ok.side_effect = True
+    ToolRegistry().register(ok)

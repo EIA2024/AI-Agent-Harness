@@ -31,13 +31,32 @@ _MUTATING_HTTP_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 def _validate_capability_invariants(tool: ToolDescriptor) -> None:
     """Reject capability metadata that contradicts the tool's declared schema.
 
-    P0-002: a descriptor claiming read-only (``side_effect=False``,
-    ``external_write=False``) must not expose mutating HTTP verbs in its
-    ``method`` enum — otherwise the policy layer auto-allows a remote
-    write/delete (R1 → no approval).
+    Registration-time capability invariants (P0-002 / P1-013):
+      * a read-only descriptor must not expose mutating HTTP verbs
+      * destructive tools must be R4
+      * external (remote) writes must be R3+
+      * any side effect (even local) must be R2+
+      * credential-scoped tools must be R1+
     """
+    risk = tool.risk_level or 0
+    if tool.destructive and risk < 4:
+        raise ValueError(
+            f"capability invariant violated for {tool.name!r}: destructive tool must be R4, got R{risk}"
+        )
+    if tool.external_write and risk < 3:
+        raise ValueError(
+            f"capability invariant violated for {tool.name!r}: external write must be R3+, got R{risk}"
+        )
+    if tool.side_effect and risk < 2:
+        raise ValueError(
+            f"capability invariant violated for {tool.name!r}: side-effecting tool must be R2+, got R{risk}"
+        )
+    if tool.credential_scope and risk < 1:
+        raise ValueError(
+            f"capability invariant violated for {tool.name!r}: credential-scoped tool must be R1+, got R{risk}"
+        )
     if tool.side_effect or tool.external_write:
-        return  # not claiming read-only; nothing to contradict
+        return  # not claiming read-only; HTTP-method check below is irrelevant
     schema = tool.input_schema or {}
     properties = schema.get("properties") if isinstance(schema, dict) else None
     method_prop = properties.get("method") if isinstance(properties, dict) else None

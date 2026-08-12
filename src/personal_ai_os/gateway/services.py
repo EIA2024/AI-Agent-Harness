@@ -24,6 +24,7 @@ class ServiceContainer:
     model_provider: Any = None
     tool_registry: Any = None
     tool_broker: Any = None
+    capabilities: Any = None
     policy_engine: Any = None
     approval_engine: Any = None
     credential_broker: Any = None
@@ -110,6 +111,10 @@ def build_default_services() -> ServiceContainer:
         from personal_ai_os.tool_broker import ToolBroker
 
         connectors = get_builtin_connectors()
+        # P1-014: owner-aware tool visibility (deny-sets plug in here).
+        from personal_ai_os.gateway.capabilities import CapabilityService
+
+        container.capabilities = CapabilityService(container.tool_registry)
         return ToolBroker(
             registry=container.tool_registry,
             policy_engine=container.policy_engine,
@@ -118,6 +123,7 @@ def build_default_services() -> ServiceContainer:
             event_bus=container.event_bus,
             approval_engine=container.approval_engine,
             audit_logger=container.audit_logger,
+            capabilities=container.capabilities,
         )
 
     container.tool_broker = _lazy(_tool_broker)

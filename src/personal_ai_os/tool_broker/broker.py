@@ -58,12 +58,14 @@ class ToolBroker:
         approval_engine=None,
         audit_logger=None,
         max_result_chars: int = 8000,
+        capabilities=None,
     ) -> None:
         self._registry = registry
         self._policy = policy_engine
         self._credentials = credential_broker
         self._approval_engine = approval_engine
         self._audit_logger = audit_logger
+        self._capabilities = capabilities
         # keyed by namespace / source / name prefix → Connector
         self._connectors: dict[str, Any] = dict(connectors or {})
         self._event_bus = event_bus
@@ -257,21 +259,31 @@ class ToolBroker:
         owner_id: UUID,
         query: str | None = None,
     ) -> list[ToolDescriptor]:
-        """Return tools visible to ``owner_id``. MVP: registry-wide filter by
-        risk (R0–R4), narrowed by ``query`` when given. ``owner_id`` is accepted
-        for forward-compat with per-owner visibility and is not yet consulted."""
+        """Return tools visible to ``owner_id`` (P1-014).
+
+        When a :class:`~personal_ai_os.gateway.capabilities.CapabilityService`
+        is injected it owns owner filtering; otherwise the legacy risk-only
+        filter applies.
+        """
+        if self._capabilities is not None:
+            return self._capabilities.visible_tools(owner_id, query=query)
         if query:
             return self._registry.search(query, risk_max=4)
         return [t for t in self._registry.list_all() if t.risk_level <= 4]
 
-    async def test_tool(
+    async def validate_tool(
         self,
         tool_name: str,
         arguments: dict,
         owner_id: UUID,
     ) -> ToolResult:
-        """Dry-run tool execution bypassing policy (no approval, no audit record)."""
-        started = time.perf_counter()
+        """Validate a tool call WITHOUT executing it (P1-015).
+
+        Replaces the former ``test_tool`` which executed the connector while
+        bypassing policy, approval and audit. This only checks that the tool is
+        registered and the arguments match its schema — a dry-run simulation
+        that can never touch a side effect.
+        """
         tool = self._registry.get(tool_name)
         if tool is None:
             return ToolResult.fail(
@@ -281,31 +293,10 @@ class ToolBroker:
             validate_arguments(tool.input_schema, arguments)
         except ValueError as exc:
             return ToolResult.fail(error=str(exc), error_code=ERR_SCHEMA)
-
-        try:
-            injected = await self._credentials.inject(tool, arguments, owner_id)
-        except Exception as exc:
-            return ToolResult.fail(error=f"Credential injection failed: {exc}", error_code=ERR_CREDENTIALS)
-
-        connector = self.resolve_connector(tool)
-        if connector is None:
-            return ToolResult.fail(error=f"No connector registered for tool {tool_name!r}", error_code=ERR_NO_CONNECTOR)
-
-        context = ToolExecutionContext(run_id=uuid4(), owner_id=owner_id)
-        exec_args = injected
-        if isinstance(exec_args, dict) and "_secrets" in exec_args:
-            exec_args = {k: v for k, v in exec_args.items() if k != "_secrets"}
-        timeout = float(tool.timeout_seconds) if tool.timeout_seconds and tool.timeout_seconds > 0 else 30.0
-        try:
-            async with asyncio.timeout(timeout):
-                result = await connector.execute(tool.name, exec_args, context)
-        except TimeoutError:
-            result = ToolResult.fail(error=f"Tool {tool_name!r} timed out", error_code=ERR_TIMEOUT)
-        except Exception as exc:
-            result = ToolResult.fail(error=str(exc), error_code=ERR_CONNECTOR)
-
-        result.latency_ms = self._latency(started)
-        return self._sanitize_result(result)
+        return ToolResult.ok(
+            data={"valid": True, "tool": tool_name},
+            text=f"{tool_name}: arguments valid (dry-run, not executed)",
+        )
 
     # ------------------------------------------------------------------
     # Internals

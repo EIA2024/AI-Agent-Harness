@@ -495,22 +495,25 @@ async def test_list_available_tools():
 
 
 @pytest.mark.asyncio
-async def test_test_tool_dry_run_skips_policy():
+async def test_validate_tool_does_not_execute_or_consult_policy():
+    """P1-015 — validate_tool is a dry-run: never executes, never touches policy."""
     policy = FakePolicy("deny")  # deny would block a real call
-    broker, registry, connector = make_broker(policy=policy)
+    broker, _registry, connector = make_broker(policy=policy)
     await register_echo(broker, connector)
-    result = await broker.test_tool("fake.echo", {"message": "hi"}, owner_id=uuid4())
-    assert result.success  # test_tool bypasses policy
+    result = await broker.validate_tool("fake.echo", {"message": "hi"}, owner_id=uuid4())
+    assert result.success is True
+    assert connector.executed == []  # the connector never ran
     assert policy.calls == []  # policy never consulted
 
 
 @pytest.mark.asyncio
-async def test_test_tool_still_validates_schema():
-    broker, _registry, _connector = make_broker()
-    await register_echo(broker, _connector)
-    result = await broker.test_tool("fake.echo", {"count": "bad"}, owner_id=uuid4())
+async def test_validate_tool_still_validates_schema():
+    broker, _registry, connector = make_broker()
+    await register_echo(broker, connector)
+    result = await broker.validate_tool("fake.echo", {"count": "bad"}, owner_id=uuid4())
     assert result.success is False
     assert result.error_code == "SCHEMA_VALIDATION_ERROR"
+    assert connector.executed == []
 
 
 @pytest.mark.asyncio
@@ -542,3 +545,28 @@ async def test_register_connector_indexes_under_namespace():
     # the registered tool resolves to the connector via namespace, prefix, and connector_name
     assert broker.resolve_connector(echo_tool()) is connector
     assert registry.get("fake.echo") is not None
+
+
+async def test_capability_service_filters_owner_visibility():
+    """P1-014 — an owner with a deny-set tool must not see it."""
+    from personal_ai_os.gateway.capabilities import CapabilityService
+    from personal_ai_os.tool_broker import ToolBroker
+    from tests.unit.test_registry import make_tool
+
+    registry = ToolRegistry()
+    registry.register(make_tool("safe.list", "safe", risk_level=1))
+    registry.register(make_tool("secret.get", "secret", risk_level=1))
+    caps = CapabilityService(registry, owner_deny={"owner-b": {"secret.get"}})
+    broker = ToolBroker(
+        registry=registry, policy_engine=FakePolicy(), credential_broker=FakeCredential(),
+        capabilities=caps,
+    )
+    a = await broker.list_available_tools(owner_id="owner-a")
+    assert any(t.name == "secret.get" for t in a)
+    b = await broker.list_available_tools(owner_id="owner-b")
+    assert not any(t.name == "secret.get" for t in b)
+    assert any(t.name == "safe.list" for t in b)
+    assert caps.can_use("owner-a", "secret.get")
+    assert not caps.can_use("owner-b", "secret.get")
+
+

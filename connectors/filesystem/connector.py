@@ -182,7 +182,9 @@ class FilesystemConnector:
                 risk_level=2,
                 side_effect=True,
                 destructive=False,
-                external_write=True,
+                # P1-013: writes stay INSIDE the jailed root — a local sandboxed
+                # side effect, not an external system write (which must be R3+).
+                external_write=False,
                 idempotent=False,
                 timeout_seconds=10,
                 retry_policy="none",
