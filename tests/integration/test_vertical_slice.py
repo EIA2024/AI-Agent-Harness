@@ -34,6 +34,7 @@ from personal_ai_os.db.session import session_scope
 from personal_ai_os.memory_engine import SQLMemoryStore
 from personal_ai_os.model_gateway import DeterministicEmbedding
 from personal_ai_os.policy_engine import ApprovalEngine, CredentialBroker, PolicyEngine
+from personal_ai_os.policy_engine.approval import ApprovalAuthMethodRequiredError
 from personal_ai_os.scheduler import EventBus
 from personal_ai_os.tool_broker import ToolBroker, ToolRegistry
 
@@ -243,6 +244,7 @@ async def test_approval_flow_approved():
         appr = (await s.execute(select(Approval))).scalars().first()
         assert appr is not None and appr.status == "pending"
         assert appr.tool_name == "mail.send"
+        assert appr.requires_auth_method is None
         approval_id = appr.id
 
     resumed = await runner.resume(
@@ -257,6 +259,67 @@ async def test_approval_flow_approved():
         assert calls[0].result["data"]["sent"] is True
         appr = await s.get(Approval, approval_id)
         assert appr.status == "approved"
+
+
+@pytest.mark.asyncio
+async def test_r4_approval_requires_passkey_and_never_executes_without_verifier():
+    """R4 step-up metadata survives broker -> graph -> runner persistence."""
+
+    class DestructiveConnector:
+        connector_name = "destructive"
+
+        def __init__(self):
+            self.executed = False
+
+        async def list_tools(self):
+            return [
+                ToolDescriptor(
+                    name="destructive.erase",
+                    namespace="destructive",
+                    description="Irreversibly erase data",
+                    input_schema={"type": "object", "properties": {}},
+                    risk_level=4,
+                    side_effect=True,
+                    destructive=True,
+                )
+            ]
+
+        async def execute(self, tool, arguments, ctx):
+            self.executed = True
+            return ToolResult.ok(text="erased")
+
+    script = [{"tool_calls": _tool_call("destructive.erase", {})}]
+    runner, _, broker, _, _, _, owner_id = await build_stack(script)
+    connector = DestructiveConnector()
+    await broker.register_connector(connector)
+    session_id = await _make_session(owner_id)
+
+    result = await runner.start(
+        session_id=session_id,
+        owner_id=owner_id,
+        user_input="清空全部数据",
+    )
+    assert result["status"] == "waiting_approval"
+    assert result["state"]["pending_approval"]["requires_auth_method"] == "passkey"
+    approval_id = result["state"]["pending_approval"]["approval_id"]
+
+    async with session_scope() as s:
+        approval = await s.get(Approval, uuid.UUID(approval_id))
+        assert approval.requires_auth_method == "passkey"
+
+    with pytest.raises(ApprovalAuthMethodRequiredError, match="passkey"):
+        await runner.resume(
+            result["id"],
+            approval_id=approval_id,
+            decision="approved",
+        )
+
+    assert connector.executed is False
+    blocked = await runner.get_run(result["id"])
+    assert blocked["status"] == "waiting_approval"
+    async with session_scope() as s:
+        approval = await s.get(Approval, uuid.UUID(approval_id))
+        assert approval.status == "pending"
 
 
 @pytest.mark.asyncio

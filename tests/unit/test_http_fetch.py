@@ -120,6 +120,57 @@ class TestNormalFetch:
         assert result.success
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "header",
+        [
+            "Host",
+            "Connection",
+            "Keep-Alive",
+            "Proxy-Connection",
+            "Proxy-Authenticate",
+            "TE",
+            "Trailer",
+            "Transfer-Encoding",
+            "Upgrade",
+        ],
+    )
+    async def test_model_arguments_cannot_set_routing_headers(self, header):
+        def handler(request: httpx.Request) -> httpx.Response:
+            raise AssertionError("request with a model-supplied routing header must not be sent")
+
+        connector = HttpFetchConnector(transport=mock_transport(handler))
+        result = await connector.execute(
+            "http_fetch.fetch",
+            {"url": "https://example.com/x", "headers": {header: "model-value"}},
+            ctx(),
+        )
+
+        assert result.success is False
+        assert result.error_code == "HTTP_HEADERS_NOT_ALLOWED"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("url", "allow_private", "expected_host"),
+        [
+            ("https://example.com:8443/x", False, "example.com:8443"),
+            ("http://127.0.0.1:8080/x", True, "127.0.0.1:8080"),
+        ],
+    )
+    async def test_connector_generates_host_from_validated_url(
+        self, url, allow_private, expected_host
+    ):
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert request.headers["host"] == expected_host
+            return httpx.Response(200, text="ok")
+
+        connector = HttpFetchConnector(
+            transport=mock_transport(handler), allow_private=allow_private
+        )
+        result = await connector.execute("http_fetch.fetch", {"url": url}, ctx())
+
+        assert result.success
+
+    @pytest.mark.asyncio
     async def test_http_error_returns_fail(self):
         def handler(request: httpx.Request) -> httpx.Response:
             raise httpx.ConnectError("connection refused")

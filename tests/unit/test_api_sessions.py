@@ -84,6 +84,34 @@ async def test_patch_and_delete_archive(make_api):
 
 
 @pytest.mark.asyncio
+async def test_patch_session_rejects_invalid_status(make_api):
+    await _ensure_user()
+    async with make_api(services=ServiceContainer()) as ac:
+        sid = (await ac.post("/v1/sessions", json={}, headers=_AUTH)).json()["id"]
+
+        response = await ac.patch(
+            f"/v1/sessions/{sid}", json={"status": "nonsense"}, headers=_AUTH
+        )
+
+        assert response.status_code == 422
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["active", "paused", "archived"])
+async def test_patch_session_accepts_public_statuses(make_api, status):
+    await _ensure_user()
+    async with make_api(services=ServiceContainer()) as ac:
+        sid = (await ac.post("/v1/sessions", json={}, headers=_AUTH)).json()["id"]
+
+        response = await ac.patch(
+            f"/v1/sessions/{sid}", json={"status": status}, headers=_AUTH
+        )
+
+        assert response.status_code == 200
+        assert response.json()["status"] == status
+
+
+@pytest.mark.asyncio
 async def test_wrong_api_key_rejected(make_api):
     async with make_api(services=ServiceContainer()) as ac:
         r = await ac.post("/v1/sessions", json={}, headers={"X-API-Key": "totally-wrong"})

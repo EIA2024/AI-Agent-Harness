@@ -182,6 +182,48 @@ async def test_allow_executes_successfully():
 
 
 @pytest.mark.asyncio
+async def test_before_connector_runs_immediately_before_real_execution():
+    order: list[str] = []
+
+    class OrderedConnector(FakeConnector):
+        async def execute(self, tool, arguments, ctx):
+            order.append("connector")
+            return await super().execute(tool, arguments, ctx)
+
+    connector = OrderedConnector()
+    broker, _registry, _connector = make_broker(connector=connector)
+    await register_echo(broker, connector)
+
+    result = await broker.execute(
+        "fake.echo",
+        {"message": "hi"},
+        ctx(),
+        before_connector=lambda: order.append("started"),
+    )
+
+    assert result.success
+    assert order == ["started", "connector"]
+
+
+@pytest.mark.asyncio
+async def test_before_connector_not_called_while_waiting_for_approval():
+    started: list[bool] = []
+    broker, _registry, connector = make_broker(policy=FakePolicy("ask"))
+    await register_echo(broker, connector)
+
+    with pytest.raises(ApprovalRequiredError):
+        await broker.execute(
+            "fake.echo",
+            {"message": "hi"},
+            ctx(),
+            before_connector=lambda: started.append(True),
+        )
+
+    assert started == []
+    assert connector.executed == []
+
+
+@pytest.mark.asyncio
 async def test_allow_passes_credential_injection():
     broker, _registry, connector = make_broker(credential=FakeCredential(extra={"api_key": "k"}))
     await register_echo(broker, connector)

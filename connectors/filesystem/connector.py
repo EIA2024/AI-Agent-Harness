@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import os
 import re
+import sys
 
 import regex as safe_regex
 
@@ -20,6 +21,7 @@ DEFAULT_MAX_FILE_SIZE = 1024 * 1024  # 1 MiB
 DEFAULT_MAX_LINES = 1000
 DEFAULT_MAX_RESULTS = 200
 DEFAULT_MAX_DEPTH = 8
+DEFAULT_MAX_ENTRIES = 1000
 
 _SENSITIVE_PATTERNS = [
     re.compile(r"^\.env(\.|$)", re.IGNORECASE),
@@ -44,6 +46,7 @@ _SENSITIVE_PATTERNS = [
 
 #: Hard ceiling for directory recursion depth (P1-002).
 HARD_MAX_DEPTH = 12
+HARD_MAX_ENTRIES = 10_000
 MAX_REGEX_LENGTH = 1_000
 REGEX_LINE_TIMEOUT_SECONDS = 0.02
 
@@ -74,6 +77,7 @@ class FilesystemConnector:
         allowed_root: str | None = None,
         max_file_size: int = DEFAULT_MAX_FILE_SIZE,
         max_depth: int = DEFAULT_MAX_DEPTH,
+        max_entries: int = DEFAULT_MAX_ENTRIES,
     ) -> None:
         if allowed_root is None:
             workspace = os.environ.get("PERSONAL_AI_WORKSPACE_ROOT")
@@ -87,6 +91,9 @@ class FilesystemConnector:
         self.allowed_root = os.path.realpath(allowed_root)
         self.max_file_size = max_file_size
         self.max_depth = max(min(max_depth or DEFAULT_MAX_DEPTH, HARD_MAX_DEPTH), 1)
+        self.max_entries = max(
+            min(max_entries or DEFAULT_MAX_ENTRIES, HARD_MAX_ENTRIES), 1
+        )
 
     # ------------------------------------------------------------------
     # Tool descriptors
@@ -128,6 +135,12 @@ class FilesystemConnector:
                         "path": {"type": "string", "description": "Directory path relative to allowed root"},
                         "recursive": {"type": "boolean", "default": False},
                         "max_depth": {"type": "integer", "minimum": 1, "default": 3},
+                        "max_entries": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": HARD_MAX_ENTRIES,
+                            "default": self.max_entries,
+                        },
                     },
                     "required": ["path"],
                     "additionalProperties": False,
@@ -176,7 +189,10 @@ class FilesystemConnector:
                     "type": "object",
                     "properties": {
                         "path": {"type": "string", "description": "Destination path relative to allowed root"},
-                        "content": {"type": "string"},
+                        "content": {
+                            "type": "string",
+                            "maxLength": self.max_file_size,
+                        },
                         "encoding": {"type": "string", "default": "utf-8"},
                         "overwrite": {"type": "boolean", "default": False},
                     },
@@ -207,7 +223,7 @@ class FilesystemConnector:
             if short == "read":
                 return self._read(arguments)
             if short == "list":
-                return self._list(arguments)
+                return await asyncio.to_thread(self._list, arguments)
             if short == "search":
                 return await self._search(arguments)
             if short == "write":
@@ -279,10 +295,23 @@ class FilesystemConnector:
                 path = path[4:]
             return os.path.realpath(path)
 
+        if sys.platform == "darwin":
+            import fcntl
+
+            path_bytes = fcntl.fcntl(
+                file_handle.fileno(), getattr(fcntl, "F_GETPATH", 50), b"\0" * 1024
+            )
+            path_bytes = path_bytes.split(b"\0", 1)[0]
+            if not path_bytes:
+                raise OSError("could not resolve opened file descriptor")
+            return os.path.realpath(os.fsdecode(path_bytes))
+
         descriptor_link = f"/proc/self/fd/{file_handle.fileno()}"
         if os.path.exists(descriptor_link):
             return os.path.realpath(descriptor_link)
-        return os.path.realpath(file_handle.name)
+        if isinstance(file_handle.name, (str, bytes, os.PathLike)):
+            return os.path.realpath(file_handle.name)
+        raise OSError("could not resolve opened file descriptor")
 
     def _verify_open_handle(self, file_handle) -> None:  # noqa: ANN001
         if not self._is_within_root(self._opened_path(file_handle)):
@@ -353,38 +382,56 @@ class FilesystemConnector:
         # P1-002: clamp requested depth to the configured AND hard ceiling so a
         # model can never request an unbounded recursive walk.
         max_depth = min(int(arguments.get("max_depth", 3)), self.max_depth, HARD_MAX_DEPTH)
+        max_entries = max(
+            min(
+                int(arguments.get("max_entries", self.max_entries)),
+                self.max_entries,
+                HARD_MAX_ENTRIES,
+            ),
+            1,
+        )
         resolved = self._resolve_path(path)
         if not os.path.isdir(resolved):
             return ToolResult.fail(error=f"not a directory: {path}", error_code="DIRECTORY_NOT_FOUND")
 
         entries: list[dict] = []
         root = os.path.normcase(os.path.realpath(self.allowed_root))
+        scanned = 0
 
-        def walk(directory: str, depth: int) -> None:
-            for name in sorted(os.listdir(directory)):
-                full = os.path.join(directory, name)
-                # Defend against symlink escapes: resolve the real path and
-                # confirm it stays inside the allowed root. Skip entries that
-                # don't (prevents listing files/dirs outside the jail).
-                real_full = os.path.realpath(full)
-                if os.path.commonpath([root, os.path.normcase(real_full)]) != root:
-                    continue
-                is_dir = os.path.isdir(full)
-                entries.append(
-                    {
-                        "name": name,
-                        "path": os.path.relpath(real_full, self.allowed_root),
-                        "is_dir": is_dir,
-                        "size_bytes": os.path.getsize(real_full) if not is_dir else None,
-                    }
-                )
-                if is_dir and recursive and depth < max_depth:
-                    walk(real_full, depth + 1)
+        def walk(directory: str, depth: int) -> bool:
+            nonlocal scanned
+            with os.scandir(directory) as iterator:
+                while True:
+                    if scanned >= max_entries:
+                        return next(iterator, None) is not None
+                    try:
+                        entry = next(iterator)
+                    except StopIteration:
+                        return False
+                    scanned += 1
+                    if self._is_sensitive(entry.name):
+                        continue
+                    real_full = os.path.realpath(entry.path)
+                    if os.path.commonpath([root, os.path.normcase(real_full)]) != root:
+                        continue
+                    is_dir = entry.is_dir()
+                    entries.append(
+                        {
+                            "name": entry.name,
+                            "path": os.path.relpath(real_full, self.allowed_root),
+                            "is_dir": is_dir,
+                            "size_bytes": entry.stat().st_size if not is_dir else None,
+                        }
+                    )
+                    if is_dir and recursive and depth < max_depth:
+                        if walk(real_full, depth + 1):
+                            return True
 
-        walk(resolved, 0)
+        truncated = walk(resolved, 0)
+        entries.sort(key=lambda entry: (entry["path"], entry["name"]))
         names = [e.get("name") for e in entries if isinstance(e, dict)]
         return ToolResult.ok(
-            data={"path": path, "entries": entries},
+            data={"path": path, "entries": entries, "truncated": truncated},
             text=f"{len(entries)} entries{_examples_summary(names)}",
         )
 
@@ -419,8 +466,6 @@ class FilesystemConnector:
             except safe_regex.error as exc:
                 return ToolResult.fail(error=f"invalid regex: {exc}", error_code="FILESYSTEM_ERROR")
 
-        root = os.path.normcase(os.path.realpath(self.allowed_root))
-
         def _scan() -> tuple[list[dict], bool, bool]:
             matches: list[dict] = []
             files_scanned = 0
@@ -432,8 +477,9 @@ class FilesystemConnector:
                     if self._is_sensitive(fname):
                         continue
                     full = os.path.join(dirpath, fname)
-                    real_full = os.path.realpath(full)
-                    if os.path.commonpath([root, os.path.normcase(real_full)]) != root:
+                    try:
+                        real_full = self._resolve_path(full)
+                    except ValueError:
                         continue
                     if not os.path.isfile(real_full):
                         continue
@@ -488,6 +534,15 @@ class FilesystemConnector:
         content = arguments.get("content", "")
         encoding = arguments.get("encoding", "utf-8")
         overwrite = bool(arguments.get("overwrite", False))
+        encoded = content.encode(encoding)
+        if len(encoded) > self.max_file_size:
+            return ToolResult.fail(
+                error=(
+                    f"file too large ({len(encoded)} bytes > "
+                    f"{self.max_file_size} bytes)"
+                ),
+                error_code="FILE_TOO_LARGE",
+            )
         resolved = self._resolve_path(path)
         if self._is_sensitive(os.path.basename(resolved)):
             return ToolResult.fail(
@@ -510,12 +565,12 @@ class FilesystemConnector:
             flags |= os.O_BINARY
         descriptor = os.open(resolved, flags, 0o600)
         try:
-            with os.fdopen(descriptor, "w", encoding=encoding) as fh:
+            with os.fdopen(descriptor, "wb") as fh:
                 self._verify_open_handle(fh)
                 if overwrite:
                     fh.seek(0)
                     fh.truncate(0)
-                fh.write(content)
+                fh.write(encoded)
         except Exception:
             try:
                 os.close(descriptor)
@@ -523,6 +578,6 @@ class FilesystemConnector:
                 pass
             raise
         return ToolResult.ok(
-            data={"path": path, "size_bytes": len(content.encode(encoding))},
-            text=f"wrote {len(content.encode(encoding))} bytes to {path}",
+            data={"path": path, "size_bytes": len(encoded)},
+            text=f"wrote {len(encoded)} bytes to {path}",
         )

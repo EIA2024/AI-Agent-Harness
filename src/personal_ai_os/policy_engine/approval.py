@@ -128,6 +128,26 @@ class ApprovalEngine:
                     f"Approval {approval_id} already {row.status}"
                 )
             if row.expires_at is not None and utc_now() > ensure_aware(row.expires_at):
+                result = await session.execute(
+                    update(Approval)
+                    .where(Approval.id == approval_id, Approval.status == "pending")
+                    .values(status="expired")
+                )
+                if result.rowcount != 1:
+                    current_status = await session.scalar(
+                        select(Approval.status).where(Approval.id == approval_id)
+                    )
+                    if current_status == "expired":
+                        raise ApprovalExpiredError(
+                            f"Approval {approval_id} has expired"
+                        )
+                    raise ApprovalNotPendingError(
+                        f"Approval {approval_id} concurrently resolved as "
+                        f"{current_status or 'missing'}"
+                    )
+                # The typed error must not make session_scope roll back the
+                # terminal status that removes this request from pending lists.
+                await session.commit()
                 raise ApprovalExpiredError(f"Approval {approval_id} has expired")
 
             # R4 currently declares passkey/step-up requirements, but this codebase

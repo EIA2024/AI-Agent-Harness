@@ -154,6 +154,10 @@ class CalculatorConnector:
         return list(self._tools)
 
     async def execute(self, tool: str, arguments: dict, ctx: ToolExecutionContext) -> ToolResult:
+        if tool != "calculator.evaluate":
+            return ToolResult.fail(
+                error=f"Unknown calculator tool: {tool}", error_code="UNKNOWN_TOOL",
+            )
         expression = arguments.get("expression")
         try:
             value = safe_evaluate(expression)

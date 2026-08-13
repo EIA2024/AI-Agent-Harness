@@ -40,6 +40,17 @@ _FORBIDDEN_CREDENTIAL_HEADERS = {
     "proxy-authorization",
     "x-api-key",
 }
+_FORBIDDEN_MODEL_HEADERS = {
+    "connection",
+    "host",
+    "keep-alive",
+    "proxy-authenticate",
+    "proxy-connection",
+    "te",
+    "trailer",
+    "transfer-encoding",
+    "upgrade",
+}
 
 
 def _is_private_ip(ip_str: str) -> bool:
@@ -337,6 +348,28 @@ class HttpFetchConnector:
                 error="credentials embedded in URLs are not allowed",
                 error_code="HTTP_CREDENTIALS_NOT_ALLOWED",
             )
+        headers = httpx.Headers(arguments.get("headers") or {})
+        forbidden = _FORBIDDEN_CREDENTIAL_HEADERS.intersection(
+            name.lower() for name in headers.keys()
+        )
+        if forbidden:
+            return ToolResult.fail(
+                error=(
+                    "credential-bearing headers are not accepted from model arguments: "
+                    + ", ".join(sorted(forbidden))
+                ),
+                error_code="HTTP_CREDENTIALS_NOT_ALLOWED",
+            )
+        forbidden = _FORBIDDEN_MODEL_HEADERS.intersection(name.lower() for name in headers.keys())
+        if forbidden:
+            return ToolResult.fail(
+                error=(
+                    "routing and hop-by-hop headers are not accepted from model arguments: "
+                    + ", ".join(sorted(forbidden))
+                ),
+                error_code="HTTP_HEADERS_NOT_ALLOWED",
+            )
+        host_header = httpx.URL(url).netloc.decode("ascii")
 
         if not self._host_allowed(host):
             logger.warning("http_fetch: domain %r not in allowlist", host)
@@ -359,7 +392,6 @@ class HttpFetchConnector:
 
         request_url = url
         request_extensions: dict[str, Any] | None = None
-        pinned_host_header: str | None = None
         if self._transport is None and not self.allow_private:
             addresses = _resolve_addresses(host)
             if not addresses:
@@ -375,9 +407,6 @@ class HttpFetchConnector:
                     error_code="SSRF_BLOCKED",
                 )
             request_url = _pinned_request_url(url, addresses[0])
-            pinned_host_header = host
-            if parsed.port is not None:
-                pinned_host_header += f":{parsed.port}"
             request_extensions = {"sni_hostname": host}
 
         short = tool.split(".")[-1] if "." in tool else tool
@@ -397,20 +426,7 @@ class HttpFetchConnector:
         else:
             return ToolResult.fail(error=f"unknown http tool: {tool}", error_code="UNKNOWN_TOOL")
 
-        headers = httpx.Headers(arguments.get("headers") or {})
-        forbidden = _FORBIDDEN_CREDENTIAL_HEADERS.intersection(
-            name.lower() for name in headers.keys()
-        )
-        if forbidden:
-            return ToolResult.fail(
-                error=(
-                    "credential-bearing headers are not accepted from model arguments: "
-                    + ", ".join(sorted(forbidden))
-                ),
-                error_code="HTTP_CREDENTIALS_NOT_ALLOWED",
-            )
-        if pinned_host_header is not None:
-            headers["Host"] = pinned_host_header
+        headers["Host"] = host_header
         body = arguments.get("body")
         timeout = min(float(arguments.get("timeout", self.default_timeout)), MAX_TIMEOUT)
 

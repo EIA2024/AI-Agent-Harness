@@ -154,6 +154,7 @@ class ChatController:
                 "tool_name": event_payload.get("tool_name", ""),
                 "action_summary": event_payload.get("action_summary", ""),
                 "risk_level": event_payload.get("risk_level", 0),
+                "requires_auth_method": event_payload.get("requires_auth_method"),
                 "arguments_preview": event_payload.get("arguments_preview") or {},
                 "status": "pending",
             }
@@ -173,6 +174,7 @@ class ChatController:
                 "tool_name": match.tool_name,
                 "action_summary": match.action_summary,
                 "risk_level": match.risk_level,
+                "requires_auth_method": match.requires_auth_method,
                 "arguments_preview": match.arguments_preview or {},
                 "status": match.status,
             }

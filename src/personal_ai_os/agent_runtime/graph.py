@@ -741,7 +741,16 @@ async def tool_request(state: AgentState, deps: _Deps) -> dict:
     run_key = str(run_uuid)
     tool_call_id = _tool_call_id(pending)
     try:
-        result = await deps.tool_broker.execute(name, arguments, ctx)
+        result = await deps.tool_broker.execute(
+            name,
+            arguments,
+            ctx,
+            before_connector=lambda: _push_tool_event(
+                run_key,
+                "tool.started",
+                {"tool_call_id": tool_call_id, "tool_name": name},
+            ),
+        )
     except ApprovalRequiredError as exc:
         # P1-030: the connector did NOT run — never emit tool.started before
         # approval.required (started means "about to execute the connector").
@@ -752,15 +761,11 @@ async def tool_request(state: AgentState, deps: _Deps) -> dict:
                 "tool_name": exc.tool_name,
                 "risk_level": exc.risk_level,
                 "reason": exc.reason,
+                "requires_auth_method": getattr(exc, "requires_auth_method", None),
             },
             "_cached_context": None,  # P0-001: approval state changed
         }
 
-    # The connector ran (no approval needed) — emit started, then completed/failed.
-    _push_tool_event(
-        run_key, "tool.started",
-        {"tool_call_id": tool_call_id, "tool_name": name},
-    )
     if result.success:
         _push_tool_event(
             run_key, "tool.completed",
@@ -817,6 +822,7 @@ async def approval(state: AgentState, deps: _Deps) -> dict:
             "tool_name": pending_approval.get("tool_name") or name,
             "risk_level": pending_approval.get("risk_level", 0),
             "reason": pending_approval.get("reason", ""),
+            "requires_auth_method": pending_approval.get("requires_auth_method"),
         }
     )
 
@@ -865,9 +871,18 @@ async def approval(state: AgentState, deps: _Deps) -> dict:
         approved_by=UUID(str(decision["approved_by"])) if decision.get("approved_by") else None,
         approval_id=UUID(approval_id) if approval_id else None,
     )
-    result = await deps.tool_broker.execute(name, arguments, ctx)
     run_key = str(run_uuid)
     tool_call_id = _tool_call_id(pending)
+    result = await deps.tool_broker.execute(
+        name,
+        arguments,
+        ctx,
+        before_connector=lambda: _push_tool_event(
+            run_key,
+            "tool.started",
+            {"tool_call_id": tool_call_id, "tool_name": name},
+        ),
+    )
     if result.success:
         _push_tool_event(
             run_key, "tool.completed",

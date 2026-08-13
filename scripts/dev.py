@@ -1,16 +1,18 @@
-"""One-click dev startup: migrate DB → start API (new window) → open TUI.
+"""One-click dev startup: migrate DB → start API → open TUI.
 
 Usage:
-    .venv\\Scripts\\python.exe scripts\\dev.py
+    uv run python scripts/dev.py
 
-Windows only (uses CREATE_NEW_CONSOLE for the API). Stops the API when the TUI
-exits. If an API is already listening on :8000 it is reused.
+On Windows, the API opens in a new console. On macOS and Linux, it runs as a
+child process in the current terminal. The API stops when the TUI exits. If an
+API is already listening on :8000 it is reused.
 """
 
 from __future__ import annotations
 
 import os
 import secrets
+import shutil
 import subprocess
 import time
 import urllib.request
@@ -19,12 +21,25 @@ from pathlib import Path
 from dotenv import dotenv_values
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-VENV_PY = os.path.join(ROOT, ".venv", "Scripts", "python.exe")
 API_URL = "http://127.0.0.1:8000"
 ENV_FILE = os.path.join(ROOT, ".env")
 DEV_API_KEY_VAR = "PERSONAL_AI_DEV_API_KEY"
 CLI_API_KEY_VAR = "PERSONAL_AI_API_KEY"
 KEY_HASH_SECRET_VAR = "PERSONAL_AI_KEY_HASH_SECRET"
+
+
+def _python_command() -> list[str]:
+    """Return the project Python command for the current platform."""
+    if shutil.which("uv"):
+        return ["uv", "run", "python"]
+
+    venv_dir = "Scripts" if os.name == "nt" else "bin"
+    python_name = "python.exe" if os.name == "nt" else "python"
+    venv_python = os.path.join(ROOT, ".venv", venv_dir, python_name)
+    if os.path.exists(venv_python):
+        return [venv_python]
+
+    raise RuntimeError("找不到 uv 或项目虚拟环境；请先安装 uv 并执行 `uv sync --extra dev`。")
 
 
 def _load_env_file(env: dict) -> None:
@@ -110,6 +125,7 @@ def main() -> None:
     print("Personal AI OS — 一键开发启动")
     print("=" * 60)
     env = _env()
+    python = _python_command()
 
     # 1. migrate the local SQLite dev DB (best-effort; fresh DBs are created by
     #    create_all on app startup, but existing DBs need the new columns).
@@ -118,13 +134,13 @@ def main() -> None:
     env["DATABASE_URL"] = f"sqlite+aiosqlite:///{db_file}"
     try:
         subprocess.run(
-            [VENV_PY, "-m", "alembic", "upgrade", "head"],
+            [*python, "-m", "alembic", "upgrade", "head"],
             cwd=ROOT, env=env, check=False,
         )
     except Exception as exc:  # noqa: BLE001
         print(f"    迁移失败（可忽略，若为全新库）: {exc}")
 
-    # 2. start the API in its own console window.
+    # 2. Windows opens the API in its own console; other platforms use a child process.
     api: subprocess.Popen | None = None
     if _api_alive():
         if not _api_usable(env):
@@ -135,9 +151,9 @@ def main() -> None:
             raise SystemExit(1)
         print("    API 已在运行，复用现有实例。")
     else:
-        print(f"\n[2/3] 启动 API 服务 → {API_URL}（新窗口）…")
+        print(f"\n[2/3] 启动 API 服务 → {API_URL}…")
         api = subprocess.Popen(
-            [VENV_PY, "-m", "apps.api.main"],
+            [*python, "-m", "apps.api.main"],
             cwd=ROOT, env=env,
             creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0),
         )
@@ -156,9 +172,7 @@ def main() -> None:
 
     # 3. open the interactive TUI in this window.
     print("\n[3/3] 启动交互 TUI（输入 Ctrl+C 退出）…\n")
-    tui = [os.path.join(ROOT, ".venv", "Scripts", "personal-ai.exe")]
-    if not os.path.exists(tui[0]):
-        tui = [VENV_PY, "-m", "apps.cli.main"]
+    tui = [*python, "-m", "apps.cli.main"]
     try:
         subprocess.call(tui, cwd=ROOT, env=env)
     except KeyboardInterrupt:

@@ -2,14 +2,19 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 import pytest
 
 from personal_ai_os.common.utils import argument_hash
+from personal_ai_os.db import session as db_session
+from personal_ai_os.db.models import Run, User
+from personal_ai_os.db.session import session_scope
 from personal_ai_os.policy_engine import ApprovalEngine
 from personal_ai_os.policy_engine.approval import (
+    ApprovalAuthMethodRequiredError,
     ApprovalExpiredError,
     ApprovalInvalidDecisionError,
     ApprovalNotFoundError,
@@ -129,14 +134,27 @@ async def test_reject_sets_status_and_receipt_is_not_verifiable(engine, make_req
     assert await engine.verify(receipt, "email.send", dict(ARGS)) is False
 
 
+async def test_passkey_approval_fails_closed_without_verifier(
+    engine, make_request, owner_id
+):
+    request = await engine.create_request(
+        **make_request(risk_level=4, requires_auth_method="passkey")
+    )
+
+    with pytest.raises(ApprovalAuthMethodRequiredError, match="passkey"):
+        await engine.resolve(request.id, decision="approved", approved_by=owner_id)
+
+    assert await engine.get_status(request.id) == "pending"
+    assert await engine.verify_approval(request.id, "email.send", dict(ARGS)) is False
+
+
 async def test_expired_request_auto_expires_and_cannot_resolve(engine, make_request, owner_id):
     request = await engine.create_request(**make_request(expires_at=datetime.now(UTC) - timedelta(seconds=1)))
 
-    fetched = await engine.get_request(request.id)
-    assert fetched.status == "expired"
-
     with pytest.raises(ApprovalExpiredError, match="expired"):
         await engine.resolve(request.id, decision="approved", approved_by=owner_id)
+
+    assert await engine.get_status(request.id) == "expired"
 
 
 async def test_unknown_decision_and_double_resolve(engine, make_request, owner_id):
@@ -148,6 +166,42 @@ async def test_unknown_decision_and_double_resolve(engine, make_request, owner_i
     await engine.resolve(request.id, decision="approved", approved_by=owner_id)
     with pytest.raises(ApprovalNotPendingError, match="already approved"):
         await engine.resolve(request.id, decision="approved", approved_by=owner_id)
+
+
+async def test_concurrent_resolve_has_one_cas_winner(tmp_path):
+    await db_session.dispose_engine()
+    db_session.configure(f"sqlite+aiosqlite:///{tmp_path / 'approval-cas.db'}")
+    await db_session.reset_database()
+
+    async with session_scope() as session:
+        user = User(username=f"cas-{uuid4().hex[:8]}")
+        session.add(user)
+        await session.flush()
+        run = Run(owner_id=user.id, status="waiting_approval", input={})
+        session.add(run)
+        await session.flush()
+        owner_id, run_id = user.id, run.id
+
+    engine = ApprovalEngine()
+    request = await engine.create_request(
+        run_id=run_id,
+        session_id=None,
+        owner_id=owner_id,
+        action_summary="Send email",
+        tool_name="email.send",
+        arguments_preview=dict(ARGS),
+        risk_level=3,
+        risk_reason="External communication",
+    )
+    outcomes = await asyncio.gather(
+        engine.resolve(request.id, decision="approved", approved_by=owner_id),
+        engine.resolve(request.id, decision="rejected", approved_by=owner_id),
+        return_exceptions=True,
+    )
+
+    assert sum(not isinstance(outcome, Exception) for outcome in outcomes) == 1
+    assert sum(isinstance(outcome, ApprovalNotPendingError) for outcome in outcomes) == 1
+    assert await engine.get_status(request.id) in {"approved", "rejected"}
 
 
 async def test_missing_approval_raises(engine):

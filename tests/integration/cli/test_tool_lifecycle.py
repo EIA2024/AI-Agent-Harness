@@ -125,3 +125,57 @@ async def test_approval_run_does_not_emit_tool_started():
 
     assert "approval.required" in events
     assert "tool.started" not in events, f"started must not precede approval: {events}"
+
+
+@pytest.mark.asyncio
+async def test_approval_resume_emits_started_before_completed_with_same_id():
+    """CUR-010 — approved execution has one stable lifecycle around the connector."""
+    from personal_ai_os.agent_runtime import streams
+    from tests.integration.test_vertical_slice import _make_session, build_stack
+
+    script = [
+        {"tool_calls": _tool_call("mail.send", {"to": "a@x.com", "subject": "s", "body": "b"})},
+        {"content": "sent"},
+    ]
+    runner, _, _, _, _, _, owner_id = await build_stack(script)
+    session_id = await _make_session(owner_id)
+
+    result = await runner.start_streaming(
+        session_id=session_id, owner_id=owner_id, user_input="发邮件"
+    )
+    queue = streams.get(result["id"])
+    assert queue is not None
+
+    approval_event = None
+    while approval_event is None:
+        event = await asyncio.wait_for(queue.get(), timeout=10)
+        if event["event"] == "approval.required":
+            approval_event = event
+
+    for _ in range(100):
+        if streams.get(result["id"]) is None:
+            break
+        await asyncio.sleep(0.01)
+
+    approval_id = approval_event["data"]["approval_id"]
+    tool_call_id = approval_event["data"]["tool_call_id"]
+    await runner.resume_streaming(
+        result["id"], approval_id=approval_id, decision="approved"
+    )
+    resumed_queue = streams.get(result["id"])
+    assert resumed_queue is not None
+
+    lifecycle: list[dict] = []
+    while True:
+        event = await asyncio.wait_for(resumed_queue.get(), timeout=10)
+        if event["event"].startswith("tool."):
+            lifecycle.append(event)
+        if event["event"] in ("run.completed", "run.failed", "run.cancelled"):
+            assert event["event"] == "run.completed"
+            break
+
+    assert [event["event"] for event in lifecycle] == [
+        "tool.started",
+        "tool.completed",
+    ]
+    assert {event["data"]["tool_call_id"] for event in lifecycle} == {tool_call_id}

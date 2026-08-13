@@ -126,6 +126,7 @@ async def test_approval_dto_from_list():
                     "risk_level": 1,
                     "status": "pending",
                     "action_summary": "read file",
+                    "requires_auth_method": "passkey",
                 }
             ]
         )
@@ -134,6 +135,16 @@ async def test_approval_dto_from_list():
     approvals = await client.list_approvals()
     assert approvals[0].id == "a1"
     assert approvals[0].risk_level == 1
+    assert approvals[0].requires_auth_method == "passkey"
+
+
+async def test_approval_dto_defaults_missing_auth_method_for_old_server():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return _json_response([{"id": "a1"}])
+
+    client = _make_client(handler)
+    approvals = await client.list_approvals()
+    assert approvals[0].requires_auth_method is None
 
 
 # ---------------------------------------------------------------------------

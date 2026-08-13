@@ -13,7 +13,7 @@ from datetime import UTC
 import pytest
 
 from personal_ai_os.cli.api.errors import APIError, ConflictError
-from tests.integration.cli.conftest import _tool_call
+from tests.integration.cli.conftest import API_KEY, _tool_call, build_stack
 
 
 async def _wait_approval(client, run_id: str) -> dict:
@@ -149,3 +149,62 @@ async def test_expired_approval_fails_closed_not_fake_success(cli_client):
         # and the run stays waiting — the tool was NOT executed
         run = await client.get_run(send.run_id)
         assert run.status == "waiting_approval"
+
+
+@pytest.mark.asyncio
+async def test_r4_plain_approve_and_resume_fail_closed_without_verifier():
+    """CUR-013 — R4 auth constraints must survive broker -> graph -> runner."""
+    from contextlib import asynccontextmanager
+
+    from httpx import ASGITransport
+
+    from personal_ai_os.cli.api.client import AsyncAPIClient
+    from tests.conftest import _dispose_engine
+
+    app = await build_stack(
+        [
+            {"tool_calls": _tool_call("mail.delete_all", {})},
+            {"content": "deleted"},
+        ]
+    )
+    connector = app.state.services.tool_broker._connectors["mail"]
+
+    @asynccontextmanager
+    async def client_context():
+        async with app.router.lifespan_context(app):
+            client = AsyncAPIClient(
+                base_url="http://test",
+                api_key=API_KEY,
+                transport=ASGITransport(app=app),
+            )
+            yield client
+            await client.aclose()
+        await _dispose_engine()
+
+    async with client_context() as client:
+        session = await client.create_session(channel="cli")
+        send = await client.send_message(session.id, "delete all mail")
+        approval = await _wait_approval(client, send.run_id)
+
+        from personal_ai_os.db.models import Approval
+        from personal_ai_os.db.session import session_scope
+
+        async with session_scope() as db:
+            row = await db.get(Approval, uuid.UUID(approval["id"]))
+            assert row is not None
+            assert row.requires_auth_method == "passkey"
+
+        with pytest.raises(APIError):
+            await client.approve(approval["id"])
+        with pytest.raises(APIError):
+            await client.resume_run(
+                send.run_id,
+                approval_id=approval["id"],
+                decision="approved",
+            )
+
+        pending = await client.list_approvals(status="pending")
+        assert any(item.id == approval["id"] for item in pending)
+        run = await client.get_run(send.run_id)
+        assert run.status == "waiting_approval"
+        assert connector.executions == []

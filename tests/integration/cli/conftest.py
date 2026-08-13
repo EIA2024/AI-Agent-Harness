@@ -58,6 +58,9 @@ class ScriptedModel:
 class FakeMailConnector:
     connector_name = "mail"
 
+    def __init__(self) -> None:
+        self.executions: list[tuple[str, dict]] = []
+
     async def list_tools(self) -> list[ToolDescriptor]:
         return [
             ToolDescriptor(
@@ -78,6 +81,15 @@ class FakeMailConnector:
                 external_write=True,
             ),
             ToolDescriptor(
+                name="mail.delete_all",
+                namespace="mail",
+                description="Delete all mail (destructive side-effect)",
+                input_schema={"type": "object", "properties": {}},
+                risk_level=4,
+                side_effect=True,
+                destructive=True,
+            ),
+            ToolDescriptor(
                 name="calculator.evaluate",
                 namespace="calculator",
                 description="Evaluate an arithmetic expression (R0 auto)",
@@ -93,8 +105,11 @@ class FakeMailConnector:
     async def execute(
         self, tool: str, arguments: dict, ctx: ToolExecutionContext
     ) -> ToolResult:
+        self.executions.append((tool, arguments))
         if tool == "mail.send":
             return ToolResult.ok(data={"sent": True, "to": arguments.get("to")})
+        if tool == "mail.delete_all":
+            return ToolResult.ok(data={"deleted": True})
         if tool == "calculator.evaluate":
             expr = arguments.get("expression", "")
             try:

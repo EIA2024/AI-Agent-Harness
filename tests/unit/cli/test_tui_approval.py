@@ -6,6 +6,7 @@ import asyncio
 from types import SimpleNamespace
 
 from textual.css.query import NoMatches
+from textual.widgets import Static
 
 from personal_ai_os.cli.api.sse import SSEDecoder
 from personal_ai_os.cli.tui.app import PersonalAIApp
@@ -66,6 +67,7 @@ class ApprovalFakeClient:
                 id="a1", run_id="r1", tool_name="email.send",
                 action_summary="send mail", risk_level=3,
                 arguments_preview={"to": "boss@x.com"}, status="pending",
+                requires_auth_method="passkey",
             )
         ]
 
@@ -147,6 +149,10 @@ async def test_session_resume_restores_history_and_pending_approval():
         assert app.controller.pending_approval["arguments_preview"] == {
             "to": "boss@x.com"
         }
+        assert app.controller.pending_approval["requires_auth_method"] == "passkey"
+        assert "passkey" in str(
+            app.screen.query_one("#approval-auth-method", Static).render()
+        )
 
 
 async def test_controller_does_not_create_session_when_resuming():
@@ -221,7 +227,7 @@ async def test_enriched_approval_event_keeps_details_without_follow_up_fetch():
 data: {"run_id": "r1"}
 
 event: approval.required
-data: {"run_id": "r1", "approval_id": "a1", "tool_call_id": "call_7", "tool_name": "email.send", "risk_level": 3, "action_summary": "send mail", "arguments_preview": {"to": "boss@x.com"}}
+data: {"run_id": "r1", "approval_id": "a1", "tool_call_id": "call_7", "tool_name": "email.send", "risk_level": 3, "action_summary": "send mail", "arguments_preview": {"to": "boss@x.com"}, "requires_auth_method": "passkey"}
 
 """
     client = ApprovalFakeClient(body, sse_fixtures.load_raw("simple_complete"))
@@ -235,6 +241,7 @@ data: {"run_id": "r1", "approval_id": "a1", "tool_call_id": "call_7", "tool_name
         assert app.controller.pending_approval["arguments_preview"] == {
             "to": "boss@x.com"
         }
+        assert app.controller.pending_approval["requires_auth_method"] == "passkey"
         assert client.list_approval_calls == 0
 
 

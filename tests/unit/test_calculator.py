@@ -44,6 +44,13 @@ async def test_evaluate_basic_arithmetic(connector):
 
 
 @pytest.mark.asyncio
+async def test_unknown_tool_fails(connector):
+    result = await connector.execute("calculator.unknown", {"expression": "2+2"}, ctx())
+    assert result.success is False
+    assert result.error_code == "UNKNOWN_TOOL"
+
+
+@pytest.mark.asyncio
 async def test_evaluate_division(connector):
     result = await connector.execute("calculator.evaluate", {"expression": "10/3"}, ctx())
     assert result.success
@@ -112,6 +119,7 @@ class TestInjectionAttacks:
 async def test_division_by_zero_fails(connector):
     result = await connector.execute("calculator.evaluate", {"expression": "1/0"}, ctx())
     assert result.success is False
+    assert result.error_code == "CALCULATOR_ERROR"
     assert "division by zero" in result.error
 
 

@@ -25,24 +25,23 @@ from sqlalchemy.pool import NullPool, StaticPool
 
 from .models import Base
 
-_MISSING_URL_MSG = (
-    "DATABASE_URL is not set. "
-    "For dev/SQLite: export DATABASE_URL='sqlite+aiosqlite:///%s/%s'"
-)
+_MISSING_URL_MSG = "APP_ENV=production requires an explicit DATABASE_URL (the SQLite fallback is development-only)"
 
 
 def get_database_url() -> str:
     """Return the database URL from the environment.
 
-    Raises ``RuntimeError`` when it is not configured — no hardcoded fallback
-    that could surprise a production deployment.
+    Production requires an explicit URL. Development falls back to a local
+    SQLite database.
     """
     url = os.getenv("DATABASE_URL")
     if url:
         return url
-    data_dir = os.path.join(os.getcwd(), "data")
+    if os.getenv("APP_ENV", "development").lower() == "production":
+        raise RuntimeError(_MISSING_URL_MSG)
+    data_dir = os.path.join(os.getcwd(), os.getenv("PERSONAL_AI_DB_DIR", "data"))
     os.makedirs(data_dir, exist_ok=True)
-    db_path = os.path.join(data_dir, "app.db")
+    db_path = os.path.join(data_dir, os.getenv("PERSONAL_AI_DB_FILE", "app.db"))
     url = f"sqlite+aiosqlite:///{db_path}"
     return url
 

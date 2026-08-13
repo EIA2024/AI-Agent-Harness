@@ -7,6 +7,10 @@
 | 001 | [CLI v2 升级报告](001-cli-v2-upgrade-report.md) | CLI 升级全过程：架构、设计约束、服务端改动、测试、对抗审查、已知限制、Phase 6 分析 | 2026-08-12 |
 | 002 | [对抗审查修复进度交接](002-adversarial-review-progress.md) | DeepSeek 对抗审查执行进度（8 P0 + 34 P1 + 5 P2 已完成）+ 剩余 13 项的精确交接指引 | 2026-08-12 |
 | 003 | [工具循环 bug 交接](003-loop-bug-handoff.md) | ReAct 循环不收敛：3 个已修根因 + 待处理的模型侧遵循问题（交接给下一个 Agent） | 2026-08-12 |
+| 004 | [ReAct 工具循环收敛修复](004-loop-convergence-fix.md) | 重复工具调用的提示词、运行时护栏与回归测试 | 2026-08-12 |
+| 005 | [全分支对抗性审查：最终问题登记](005-adversarial-review-findings.md) | 运行时、安全、连接器、部署与 API 的问题清单 | 2026-08-12 |
+| 006 | [对抗性审查修复方案](006-adversarial-remediation-plan.md) | 对抗性审查问题的修复原则、任务卡与验证计划 | 2026-08-12 |
+| 007 | [安全修复与本地启动收尾](007-security-remediation-and-local-startup.md) | 本轮修复的现役状态、验证结果与跨平台本地启动入口 | 2026-08-13 |
 
 ## 命名与维护约定
 

@@ -60,6 +60,37 @@ def test_insecure_config_detector_warns_on_placeholder_db_password(monkeypatch, 
     assert "placeholder password" in caplog.text
 
 
+def test_db_session_production_requires_explicit_database_url(monkeypatch):
+    """CUR-008: non-API database entry points fail closed in production."""
+    from personal_ai_os.db import session as db_session
+
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.setenv("APP_ENV", "production")
+    with pytest.raises(RuntimeError, match="DATABASE_URL"):
+        db_session.get_database_url()
+
+
+def test_db_session_development_keeps_sqlite_fallback(monkeypatch, tmp_path):
+    from personal_ai_os.db import session as db_session
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.setenv("APP_ENV", "development")
+
+    expected_url = f"sqlite+aiosqlite:///{tmp_path}/data/app.db"
+    assert db_session.get_database_url() == expected_url
+
+
+def test_db_session_keeps_explicit_database_url_in_production(monkeypatch):
+    from personal_ai_os.db import session as db_session
+
+    url = "postgresql+asyncpg://user:secret@db:5432/app"
+    monkeypatch.setenv("DATABASE_URL", url)
+    monkeypatch.setenv("APP_ENV", "production")
+
+    assert db_session.get_database_url() == url
+
+
 @pytest.mark.asyncio
 async def test_production_requires_explicit_database_url(monkeypatch):
     """P1-024 — APP_ENV=production with no DATABASE_URL fails startup."""

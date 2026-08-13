@@ -39,17 +39,22 @@ uv sync --extra dev
 # 2. 配置 LLM Provider（OpenAI/Anthropic/DeepSeek/...，支持多套切换）
 uv run python -m apps.cli.main config init
 #    → 交互式向导：请求格式（OpenAI 兼容 / Anthropic）→ Base URL → API Key → 模型
-#    → 元数据保存在 ~/.personal_ai/profiles.json，API Key 存入系统 keyring
 
-# 3. 启动 API（默认本地 SQLite）
+# 3. 一键启动本地开发环境（首次运行会生成并保存本地 API 密钥）
+# macOS / Linux：
+./start.sh
+# Windows（cmd 或 PowerShell）：
+start.bat
+# → 迁移 SQLite → 启动 API → 打开交互式 TUI
+# → API 文档：http://127.0.0.1:8000/docs
+
+# 4. 仅启动 API（默认本地 SQLite）
 export PERSONAL_AI_DEV_API_KEY=replace-with-a-local-secret
-export PERSONAL_AI_KEY_HASH_SECRET=replace-with-another-long-random-secret
 uv run python -m apps.api.main
 # → http://localhost:8000   （交互式文档 /docs）
 
-# 4. 另开终端，用 CLI 对话
+# 5. 另开终端，用 CLI 对话
 export PERSONAL_AI_API_URL=http://localhost:8000
-export PERSONAL_AI_API_KEY=replace-with-a-local-secret
 uv run python -m apps.cli.main chat
 ```
 

@@ -92,6 +92,87 @@ async def test_memory_crud(make_api):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "invalid_scores",
+    [
+        {"importance": -0.01},
+        {"importance": 1.01},
+        {"confidence": -0.01},
+        {"confidence": 1.01},
+    ],
+)
+async def test_create_memory_rejects_out_of_range_scores(make_api, invalid_scores):
+    await _ensure_user()
+    async with make_api(services=ServiceContainer()) as ac:
+        response = await ac.post(
+            "/v1/memories",
+            json={"type": "fact", "content": "invalid scores"} | invalid_scores,
+            headers=_AUTH,
+        )
+
+        assert response.status_code == 422
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "invalid_update",
+    [
+        {"importance": -0.01},
+        {"importance": 1.01},
+        {"confidence": -0.01},
+        {"confidence": 1.01},
+        {"status": "nonsense"},
+    ],
+)
+async def test_update_memory_rejects_invalid_values(make_api, invalid_update):
+    await _ensure_user()
+    async with make_api(services=ServiceContainer()) as ac:
+        created = await ac.post(
+            "/v1/memories",
+            json={"type": "fact", "content": "valid memory"},
+            headers=_AUTH,
+        )
+        mid = created.json()["id"]
+
+        response = await ac.patch(
+            f"/v1/memories/{mid}", json=invalid_update, headers=_AUTH
+        )
+
+        assert response.status_code == 422
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["active", "draft", "superseded", "forgotten"])
+async def test_memory_accepts_score_boundaries_and_public_statuses(make_api, status):
+    await _ensure_user()
+    async with make_api(services=ServiceContainer()) as ac:
+        created = await ac.post(
+            "/v1/memories",
+            json={
+                "type": "fact",
+                "content": "boundary scores",
+                "importance": 0,
+                "confidence": 1,
+            },
+            headers=_AUTH,
+        )
+        assert created.status_code == 201
+        assert created.json()["importance"] == 0
+        assert created.json()["confidence"] == 1
+
+        response = await ac.patch(
+            f"/v1/memories/{created.json()['id']}",
+            json={"importance": 1, "confidence": 0, "status": status},
+            headers=_AUTH,
+        )
+
+        assert response.status_code == 200
+        assert response.json()["importance"] == 1
+        assert response.json()["confidence"] == 0
+        assert response.json()["status"] == status
+
+
+@pytest.mark.asyncio
 async def test_memory_search_with_injected_store(make_api):
     await _ensure_user()
     store = FakeMemoryStore()

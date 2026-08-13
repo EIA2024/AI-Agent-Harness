@@ -7,6 +7,7 @@ deterministic doubles — no real connectors involved.
 
 from __future__ import annotations
 
+import inspect
 import uuid
 from datetime import UTC, datetime
 
@@ -80,7 +81,9 @@ class FakeToolBroker:
         self.calls = []  # (tool_name, arguments, ctx)
         self.denied = set()
 
-    async def execute(self, tool_name: str, arguments: dict, context):
+    async def execute(
+        self, tool_name: str, arguments: dict, context, *, before_connector=None
+    ):
         self.calls.append((tool_name, dict(arguments), context))
         # A real broker keeps raising until an approved context is attached —
         # this is what makes the runtime's approval node replay-safe.
@@ -91,6 +94,10 @@ class FakeToolBroker:
                 risk_level=2,
                 reason="high-risk tool needs approval",
             )
+        if before_connector is not None:
+            callback_result = before_connector()
+            if inspect.isawaitable(callback_result):
+                await callback_result
         if self.results:
             idx = min(len(self.calls) - 1, len(self.results) - 1)
             result = self.results[idx]

@@ -138,8 +138,6 @@ class PolicyEngine:
         constraints: dict = {}
         if rule.require_auth_method:
             constraints["require_auth_method"] = rule.require_auth_method
-        if rule.decision == "ask" and risk_level >= 3:
-            constraints.setdefault("require_auth_method", "passkey")
         return PolicyDecision(
             decision=rule.decision,  # type: ignore[arg-type]
             risk_level=risk_level,

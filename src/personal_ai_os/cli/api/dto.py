@@ -129,6 +129,7 @@ class ApprovalDTO:
     arguments_preview: dict[str, Any] | None = None
     risk_level: int = 0
     risk_reason: str = ""
+    requires_auth_method: str | None = None
     argument_hash: str | None = None
     status: str = "pending"
     approved_by: str | None = None
@@ -146,6 +147,7 @@ class ApprovalDTO:
             arguments_preview=_d(data, "arguments_preview"),
             risk_level=_d(data, "risk_level") or 0,
             risk_reason=_d(data, "risk_reason") or "",
+            requires_auth_method=_d(data, "requires_auth_method"),
             argument_hash=_d(data, "argument_hash"),
             status=_d(data, "status") or "pending",
             approved_by=_d(data, "approved_by"),

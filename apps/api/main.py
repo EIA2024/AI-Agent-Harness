@@ -23,7 +23,6 @@ from personal_ai_os.gateway.services import (
     complete_wiring,
 )
 
-from . import config
 from .deps import ensure_dev_owner
 from .routers import (
     approvals,
@@ -39,22 +38,15 @@ from .routers import (
 
 
 async def ensure_database() -> None:
-    """Point the DB at a local SQLite file when nothing is configured yet.
+    """Configure the database and validate its production schema.
 
     P1-024: the SQLite fallback is DEV-ONLY — when ``APP_ENV=production`` a
     missing ``DATABASE_URL`` is a hard startup error, never a silent fallback.
     """
     app_env = os.environ.get("APP_ENV", "development").lower()
-    if app_env == "production" and not os.environ.get("DATABASE_URL"):
-        raise RuntimeError(
-            "APP_ENV=production requires an explicit DATABASE_URL "
-            "(the SQLite fallback is dev-only, P1-024)"
-        )
-    if not os.environ.get("DATABASE_URL") and db_session._engine is None:
-        data_dir = os.path.join(os.getcwd(), config.DB_DIR)
-        os.makedirs(data_dir, exist_ok=True)
-        db_path = os.path.join(data_dir, config.DB_FILE)
-        db_session.configure(f"sqlite+aiosqlite:///{db_path}")
+    database_url = db_session.get_database_url()
+    if db_session._engine is None:
+        db_session.configure(database_url)
     if app_env == "production":
         await _validate_schema_revision()
     else:

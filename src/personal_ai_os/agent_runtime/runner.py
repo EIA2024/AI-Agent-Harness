@@ -565,29 +565,39 @@ class RunRunner:
         if run_row.status != "waiting_approval":
             raise ValueError("Run is not waiting for approval")
         state = dict(run_row.state or {})
+        if approval_id is None:
+            raise ValueError("approval_id is required to resume a waiting approval")
+        approval_uuid = _coerce_uuid(approval_id)
+        pending = state.get("pending_approval") or {}
+        pending_id = pending.get("approval_id") if isinstance(pending, dict) else None
+        if pending_id is not None and _coerce_uuid(pending_id) != approval_uuid:
+            raise ValueError("approval_id does not match the run's pending approval")
+        async with session_scope() as session:
+            approval = await session.get(Approval, approval_uuid)
+            if approval is None or approval.run_id != run_uuid:
+                raise ValueError("approval_id is not bound to this run")
         decision = (decision or "approved").lower()
         approved_by = run_row.owner_id
 
-        if approval_id is not None:
-            if self.approval_engine is None:
-                raise RuntimeError("approval engine is unavailable; refusing unsafe resume")
-            try:
-                await self.approval_engine.resolve(
-                    _coerce_uuid(approval_id),
-                    decision=decision,
-                    approved_by=approved_by,
-                    edited_arguments=edited_arguments,
-                )
-            except ApprovalNotPendingError:
-                # The explicit approval endpoint may already have resolved it.
-                pass
+        if self.approval_engine is None:
+            raise RuntimeError("approval engine is unavailable; refusing unsafe resume")
+        try:
+            await self.approval_engine.resolve(
+                approval_uuid,
+                decision=decision,
+                approved_by=approved_by,
+                edited_arguments=edited_arguments,
+            )
+        except ApprovalNotPendingError:
+            # The explicit approval endpoint may already have resolved it.
+            pass
 
         await self._claim_waiting_run(run_uuid)
         resume_value: dict = {"decision": decision, "approved_by": str(approved_by)}
         if edited_arguments:
             resume_value["edited_arguments"] = edited_arguments
 
-        if self.event_bus is not None and approval_id is not None:
+        if self.event_bus is not None:
             event_type = (
                 EventTypes.APPROVAL_APPROVED
                 if decision in ("approved", "approved_with_edits")
@@ -599,7 +609,7 @@ class RunRunner:
                     owner_id=run_row.owner_id,
                     run_id=run_uuid,
                     session_id=run_row.session_id,
-                    payload={"approval_id": str(approval_id), "decision": decision},
+                    payload={"approval_id": str(approval_uuid), "decision": decision},
                 )
             )
 

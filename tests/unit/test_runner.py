@@ -274,6 +274,34 @@ async def test_resume_uses_approval_engine_when_injected(seeded_db):
     assert approval_engine.resolved[0][1] == "approved"
 
 
+async def test_resume_waiting_approval_requires_approval_id_without_mutation(seeded_db):
+    owner_id, session_id = seeded_db
+    broker = make_approval_broker()
+    runner, _, _ = make_runner(
+        script=[
+            {"content": None, "tool_calls": [tool_call("send_mail", {"to": "a@b.c"})]},
+            {"content": "邮件已发送", "tool_calls": None},
+        ],
+        tool_broker=broker,
+    )
+    paused = await runner.start(
+        session_id=session_id, owner_id=owner_id, user_input="帮我发一封邮件"
+    )
+    approval_id = paused["state"]["pending_approval"]["approval_id"]
+    calls_before_resume = len(broker.calls)
+
+    with pytest.raises(ValueError, match="approval_id"):
+        await runner.resume(paused["id"], decision="approved")
+
+    current = await runner.get_run(paused["id"])
+    assert current["status"] == "waiting_approval"
+    assert current["state"] == paused["state"]
+    async with db_session.session_scope() as session:
+        approval = await session.get(Approval, uuid.UUID(approval_id))
+        assert approval.status == "pending"
+    assert len(broker.calls) == calls_before_resume
+
+
 async def test_resume_non_waiting_run_raises(seeded_db):
     owner_id, session_id = seeded_db
     runner, provider, broker = make_runner(script=[{"content": "hi", "tool_calls": None}])

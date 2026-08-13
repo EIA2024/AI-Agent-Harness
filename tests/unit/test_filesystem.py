@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
+import sys
+import time
 from uuid import uuid4
 
 import pytest
 import regex as safe_regex
 
+import connectors.filesystem.connector as filesystem_module
 from connectors.filesystem.connector import FilesystemConnector
 from personal_ai_os.common.models import ToolExecutionContext
 
@@ -44,6 +48,15 @@ async def test_list_tools(connector):
     assert by_name["filesystem.read"].risk_level == 1
     assert by_name["filesystem.write"].risk_level == 2
     assert by_name["filesystem.write"].side_effect is True
+
+
+@pytest.mark.asyncio
+async def test_write_schema_uses_instance_max_file_size(tmp_path):
+    connector = FilesystemConnector(allowed_root=str(tmp_path), max_file_size=123)
+    tools = await connector.list_tools()
+    write = next(tool for tool in tools if tool.name == "filesystem.write")
+
+    assert write.input_schema["properties"]["content"]["maxLength"] == 123
 
 
 class TestRead:
@@ -125,6 +138,126 @@ class TestList:
         assert result.success is False
         assert result.error_code == "DIRECTORY_NOT_FOUND"
 
+    @pytest.mark.asyncio
+    async def test_list_stops_at_configured_max_entries(self, tmp_path, monkeypatch):
+        for index in range(5):
+            (tmp_path / f"{index}.txt").write_text("x")
+
+        real_scandir = os.scandir
+        yielded = 0
+        resolved = 0
+
+        class CountingScandir:
+            def __init__(self, path):
+                self._iterator = real_scandir(path)
+
+            def __enter__(self):
+                self._iterator.__enter__()
+                return self
+
+            def __exit__(self, *args):
+                return self._iterator.__exit__(*args)
+
+            def __iter__(self):
+                return self
+
+            def __next__(self):
+                nonlocal yielded
+                entry = next(self._iterator)
+                yielded += 1
+                return entry
+
+        monkeypatch.setattr(filesystem_module.os, "scandir", CountingScandir)
+        real_realpath = os.path.realpath
+
+        def counting_realpath(path):
+            nonlocal resolved
+            if os.path.basename(os.fspath(path)).endswith(".txt"):
+                resolved += 1
+            return real_realpath(path)
+
+        limited = FilesystemConnector(allowed_root=str(tmp_path), max_entries=2)
+        resolved = 0
+        monkeypatch.setattr(filesystem_module.os.path, "realpath", counting_realpath)
+        result = await limited.execute("filesystem.list", {"path": "."}, ctx())
+
+        assert result.success
+        assert len(result.data["entries"]) == 2
+        assert result.data["truncated"] is True
+        assert yielded == 3
+        assert resolved == 2
+
+    @pytest.mark.asyncio
+    async def test_list_exact_budget_without_more_is_not_truncated(self, tmp_path):
+        for index in range(2):
+            (tmp_path / f"{index}.txt").write_text("x")
+
+        limited = FilesystemConnector(allowed_root=str(tmp_path), max_entries=2)
+        result = await limited.execute("filesystem.list", {"path": "."}, ctx())
+
+        assert result.success
+        assert len(result.data["entries"]) == 2
+        assert result.data["truncated"] is False
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("blocked_name", [".env", "outside-link"])
+    async def test_list_blocked_entries_consume_scan_budget(
+        self, tmp_path, blocked_name, monkeypatch
+    ):
+        outside = tmp_path.parent / f"{tmp_path.name}-outside"
+        outside.mkdir()
+        if blocked_name == ".env":
+            (tmp_path / blocked_name).write_text("SECRET=1")
+        else:
+            try:
+                (tmp_path / blocked_name).symlink_to(outside, target_is_directory=True)
+            except OSError:
+                pytest.skip("symlinks are unavailable on this host")
+        (tmp_path / "visible.txt").write_text("x")
+
+        real_scandir = os.scandir
+
+        class SortedScandir:
+            def __init__(self, path):
+                with real_scandir(path) as iterator:
+                    self._entries = iter(sorted(iterator, key=lambda entry: entry.name))
+
+            def __enter__(self):
+                return self._entries
+
+            def __exit__(self, *_args):
+                return None
+
+        monkeypatch.setattr(filesystem_module.os, "scandir", SortedScandir)
+        limited = FilesystemConnector(allowed_root=str(tmp_path), max_entries=1)
+        result = await limited.execute("filesystem.list", {"path": "."}, ctx())
+
+        assert result.success
+        assert result.data["entries"] == []
+        assert result.data["truncated"] is True
+
+    def test_list_clamps_configured_max_entries_to_hard_cap(self, tmp_path):
+        limited = FilesystemConnector(allowed_root=str(tmp_path), max_entries=10**9)
+
+        assert limited.max_entries == filesystem_module.HARD_MAX_ENTRIES
+
+    @pytest.mark.asyncio
+    async def test_list_does_not_block_event_loop(self, connector, monkeypatch):
+        original_list = connector._list
+
+        def slow_list(arguments):
+            time.sleep(0.05)
+            return original_list(arguments)
+
+        monkeypatch.setattr(connector, "_list", slow_list)
+        list_task = asyncio.create_task(
+            connector.execute("filesystem.list", {"path": "."}, ctx())
+        )
+        await asyncio.sleep(0.01)
+
+        assert list_task.done() is False
+        assert (await list_task).success
+
 
 class TestSearch:
     @pytest.mark.asyncio
@@ -159,6 +292,25 @@ class TestSearch:
     async def test_search_skips_sensitive_files(self, connector):
         # "SECRET" appears only in .env which must be skipped
         result = await connector.execute("filesystem.search", {"path": ".", "pattern": "SECRET"}, ctx())
+        assert result.success
+        assert result.data["matches"] == []
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("target_name", [".env", "secret.txt"])
+    async def test_search_skips_plain_named_symlink_to_sensitive_file(
+        self, connector, root, target_name
+    ):
+        target = root / target_name
+        target.write_text("SYMLINK_SECRET\n", encoding="utf-8")
+        try:
+            (root / "safe.txt").symlink_to(target)
+        except OSError:
+            pytest.skip("symlinks are unavailable on this host")
+
+        result = await connector.execute(
+            "filesystem.search", {"path": ".", "pattern": "SYMLINK_SECRET"}, ctx()
+        )
+
         assert result.success
         assert result.data["matches"] == []
 
@@ -218,6 +370,86 @@ class TestWrite:
         result = await connector.execute("filesystem.write", {"path": ".env", "content": "x"}, ctx())
         assert result.success is False
         assert result.error_code == "SENSITIVE_FILE"
+
+    @pytest.mark.asyncio
+    async def test_write_limit_uses_encoded_bytes(self, tmp_path):
+        limited = FilesystemConnector(allowed_root=str(tmp_path), max_file_size=3)
+        result = await limited.execute(
+            "filesystem.write",
+            {"path": "out.txt", "content": "éé", "encoding": "utf-8"},
+            ctx(),
+        )
+
+        assert result.success is False
+        assert result.error_code == "FILE_TOO_LARGE"
+        assert not (tmp_path / "out.txt").exists()
+
+    @pytest.mark.asyncio
+    async def test_write_uses_exact_encoded_bytes_without_newline_translation(
+        self, tmp_path, monkeypatch
+    ):
+        real_fdopen = os.fdopen
+
+        def binary_fdopen(descriptor, mode, **kwargs):
+            assert mode == "wb"
+            assert "encoding" not in kwargs
+            return real_fdopen(descriptor, mode, **kwargs)
+
+        monkeypatch.setattr(filesystem_module.os, "fdopen", binary_fdopen)
+        content = "first\nsecond\n"
+        encoded = content.encode("utf-8")
+        limited = FilesystemConnector(
+            allowed_root=str(tmp_path), max_file_size=len(encoded)
+        )
+        result = await limited.execute(
+            "filesystem.write",
+            {"path": "out.txt", "content": content, "encoding": "utf-8"},
+            ctx(),
+        )
+
+        assert result.success
+        assert (tmp_path / "out.txt").read_bytes() == encoded
+        assert result.data["size_bytes"] == len(encoded)
+
+    @pytest.mark.asyncio
+    async def test_darwin_fd_path_failure_does_not_truncate_or_write(
+        self, tmp_path, monkeypatch
+    ):
+        fcntl = pytest.importorskip("fcntl")
+        target = tmp_path / "out.txt"
+        target.write_text("original", encoding="utf-8")
+        connector = FilesystemConnector(allowed_root=str(tmp_path))
+
+        monkeypatch.setattr(sys, "platform", "darwin")
+        monkeypatch.setattr(
+            fcntl,
+            "fcntl",
+            lambda *_args: (_ for _ in ()).throw(OSError("F_GETPATH failed")),
+        )
+        result = await connector.execute(
+            "filesystem.write",
+            {"path": "out.txt", "content": "replacement", "overwrite": True},
+            ctx(),
+        )
+
+        assert result.success is False
+        assert target.read_text(encoding="utf-8") == "original"
+
+
+def test_darwin_opened_path_uses_f_getpath(tmp_path, monkeypatch):
+    fcntl = pytest.importorskip("fcntl")
+    target = tmp_path / "out.txt"
+    target.write_text("data", encoding="utf-8")
+    connector = FilesystemConnector(allowed_root=str(tmp_path))
+
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setattr(
+        fcntl,
+        "fcntl",
+        lambda *_args: os.fsencode(target) + b"\0ignored",
+    )
+    with target.open() as handle:
+        assert connector._opened_path(handle) == os.path.realpath(target)
 
 
 class TestSizeLimit:

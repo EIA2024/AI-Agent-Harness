@@ -176,13 +176,26 @@ async def test_run_resume(make_api, db):
 
     async with make_api(services=ServiceContainer(runner=runner)) as ac:
         r = await ac.post(f"/v1/runs/{run.id}/resume", json={}, headers=headers)
-        assert r.status_code == 200
-        assert r.json()["status"] == "running"
-        assert runner.resumed == [(run.id, None, "approved", None)]
+        assert r.status_code == 422
+        assert runner.resumed == []
+
+        approval_id = uuid.uuid4()
+        resumed = await ac.post(
+            f"/v1/runs/{run.id}/resume",
+            json={"approval_id": str(approval_id)},
+            headers=headers,
+        )
+        assert resumed.status_code == 200
+        assert resumed.json()["status"] == "running"
+        assert runner.resumed == [(run.id, approval_id, "approved", None)]
 
         # completed runs cannot be resumed
         done = await _make_run(u.id, status="completed")
-        blocked = await ac.post(f"/v1/runs/{done.id}/resume", json={}, headers=headers)
+        blocked = await ac.post(
+            f"/v1/runs/{done.id}/resume",
+            json={"approval_id": str(uuid.uuid4())},
+            headers=headers,
+        )
         assert blocked.status_code == 409
 
 

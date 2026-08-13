@@ -36,10 +36,16 @@ class ApprovalScreen(ModalScreen[tuple[str, dict[str, Any] | None]]):
         tool = self.approval.get("tool_name", "?")
         summary = self.approval.get("action_summary", "")
         args = self.approval.get("arguments_preview", {})
+        auth_method = self.approval.get("requires_auth_method")
         with Vertical(classes="approval-panel"):
             yield Static(f"[bold red]! Approval required · R{risk}[/]", id="approval-title")
             yield Static(f"Tool: {strip_control_sequences(tool)}")
             yield Static(f"Action: {strip_control_sequences(summary or '(none)')}")
+            if auth_method:
+                yield Static(
+                    f"Required auth: {strip_control_sequences(auth_method)}",
+                    id="approval-auth-method",
+                )
             yield Static(f"Args: {json.dumps(redact_secrets(args), ensure_ascii=False)[:400]}")
             yield Static("", id="edit-hint")
             yield Input(placeholder='Edited args (JSON) — used with Edit', id="edit-input")

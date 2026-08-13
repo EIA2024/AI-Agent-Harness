@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from typing import Literal
 from uuid import UUID
 
 from pydantic import BaseModel, Field
@@ -20,7 +21,7 @@ class SessionCreate(BaseModel):
 class SessionUpdate(BaseModel):
     title: str | None = Field(default=None, max_length=200)
     project_id: UUID | None = None
-    status: str | None = Field(default=None, max_length=32)
+    status: Literal["active", "paused", "archived"] | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -39,7 +40,7 @@ class MessageCreate(BaseModel):
 
 
 class RunResumeBody(BaseModel):
-    approval_id: UUID | None = None
+    approval_id: UUID
     decision: str | None = None
     edited_arguments: dict | None = None
 
@@ -54,8 +55,8 @@ class MemoryCreateBody(BaseModel):
     scope: str = "global"
     content: str
     summary: str | None = None
-    importance: float = 0.5
-    confidence: float = 0.5
+    importance: float = Field(default=0.5, ge=0, le=1)
+    confidence: float = Field(default=0.5, ge=0, le=1)
     source_type: str = "manual"
     sensitivity: str = "personal"
 
@@ -63,9 +64,9 @@ class MemoryCreateBody(BaseModel):
 class MemoryUpdateBody(BaseModel):
     content: str | None = None
     summary: str | None = None
-    importance: float | None = None
-    confidence: float | None = None
-    status: str | None = None
+    importance: float | None = Field(default=None, ge=0, le=1)
+    confidence: float | None = Field(default=None, ge=0, le=1)
+    status: Literal["active", "draft", "superseded", "forgotten"] | None = None
 
 
 class MemorySearchBody(BaseModel):

@@ -57,6 +57,7 @@ async def test_r3_ask(engine):
     assert decision.decision == "ask"
     assert decision.risk_level == 3
     assert decision.requires_approval_receipt is True
+    assert "require_auth_method" not in decision.constraints
 
 
 async def test_r4_ask_with_auth(engine):

@@ -137,6 +137,8 @@ class ToolBroker:
         tool_name: str,
         arguments: dict,
         context: ToolExecutionContext,
+        *,
+        before_connector=None,
     ) -> ToolResult:
         started = time.perf_counter()
         tool = self._registry.get(tool_name)
@@ -253,11 +255,9 @@ class ToolBroker:
                     tool_name=tool.name,
                     risk_level=tool.risk_level,
                     reason=reason,
-                )
-                # ApprovalRequiredError predates the step-up field and is not a
-                # slotted class, so carry the constraint without breaking callers.
-                exc.requires_auth_method = decision.constraints.get(
-                    "require_auth_method"
+                    requires_auth_method=decision.constraints.get(
+                        "require_auth_method"
+                    ),
                 )
                 raise exc
 
@@ -350,6 +350,10 @@ class ToolBroker:
             if tool.timeout_seconds and tool.timeout_seconds > 0
             else 30.0
         )
+        if before_connector is not None:
+            callback_result = before_connector()
+            if inspect.isawaitable(callback_result):
+                await callback_result
         try:
             async with asyncio.timeout(timeout):
                 result = await connector.execute(tool.name, exec_args, exec_context)

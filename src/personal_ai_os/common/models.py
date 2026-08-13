@@ -93,12 +93,21 @@ class ApprovalRequiredError(AgentOSError):
     code = ErrorCode.APPROVAL_REJECTED  # reuses taxonomy; recoverable via approval
     recoverable = True
 
-    def __init__(self, *, request_id: UUID, tool_name: str, risk_level: int, reason: str):
+    def __init__(
+        self,
+        *,
+        request_id: UUID,
+        tool_name: str,
+        risk_level: int,
+        reason: str,
+        requires_auth_method: str | None = None,
+    ):
         super().__init__(f"Approval required for {tool_name}: {reason}")
         self.request_id = request_id
         self.tool_name = tool_name
         self.risk_level = risk_level
         self.reason = reason
+        self.requires_auth_method = requires_auth_method
 
 
 class TimeoutError_(AgentOSError):
