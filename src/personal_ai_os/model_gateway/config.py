@@ -1,9 +1,8 @@
 """Provider profile configuration store (local, outside the repo).
 
 Lets the user keep **multiple** LLM provider profiles (OpenAI / Anthropic /
-DeepSeek / Moonshot / …) and switch between them. Secrets are stored in a JSON
-file *outside* the git repository (default ``~/.personal_ai/profiles.json``) so
-API keys never enter the repo.
+DeepSeek / Moonshot / …) and switch between them. Profile metadata is stored in
+JSON outside the repository; API keys live only in the operating-system keyring.
 
 Profile fields:
 
@@ -44,6 +43,72 @@ def _now() -> str:
     return datetime.now(UTC).isoformat()
 
 
+class SecretVault:
+    """OS-keyring storage for provider API keys."""
+
+    _SERVICE = "personal-ai-os"
+
+    @classmethod
+    def set(cls, name: str, key: str) -> bool:
+        try:
+            import keyring  # type: ignore[import-not-found]
+
+            keyring.set_password(cls._SERVICE, name, key)
+            return True
+        except Exception:  # noqa: BLE001 - keyring unavailable → file fallback
+            return False
+
+    @classmethod
+    def get(cls, name: str) -> str | None:
+        try:
+            import keyring  # type: ignore[import-not-found]
+
+            return keyring.get_password(cls._SERVICE, name)
+        except Exception:  # noqa: BLE001
+            return None
+
+    @classmethod
+    def delete(cls, name: str) -> bool:
+        try:
+            import keyring
+
+            keyring.delete_password(cls._SERVICE, name)
+            return True
+        except Exception:  # noqa: BLE001
+            return False
+
+
+def _is_loopback(host: str) -> bool:
+    import ipaddress
+
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return host.lower() in ("localhost", "127.0.0.1", "::1")
+
+
+def _validate_base_url(base_url: str, name: str) -> None:
+    """Reject a provider base_url that would leak the API key over plaintext.
+
+    P1-018: custom endpoints must be https (or loopback http for local
+    models). Sending an API key to an arbitrary http:// host is refused.
+    """
+    if not base_url:
+        return
+    from urllib.parse import urlparse
+
+    parsed = urlparse(base_url)
+    if parsed.scheme not in ("http", "https"):
+        raise ValueError(
+            f"profile {name!r}: base_url must be http(s), got {parsed.scheme!r}"
+        )
+    if parsed.scheme == "http" and not _is_loopback(parsed.hostname or ""):
+        raise ValueError(
+            f"profile {name!r}: http base_url is only allowed for loopback "
+            f"(localhost); use https for {parsed.hostname!r} (P1-018)"
+        )
+
+
 @dataclass
 class ProviderProfile:
     """A single LLM provider profile."""
@@ -56,6 +121,7 @@ class ProviderProfile:
     max_tokens: int = 0  # 0 → provider default (4096 for reasoning models)
     created_at: str = ""
     updated_at: str = ""
+    secret_ref: str = ""
     extra: dict = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -75,7 +141,17 @@ class ProviderProfile:
         return self.api_key[:4] + "…" + self.api_key[-4:]
 
     def to_dict(self) -> dict:
-        return asdict(self)
+        """Return display-safe metadata; never serialize ``api_key``."""
+        data = self.to_storage_dict()
+        data.pop("secret_ref", None)
+        data["key_configured"] = bool(self.api_key or self.secret_ref)
+        return data
+
+    def to_storage_dict(self) -> dict:
+        """Return JSON metadata containing only an opaque keyring reference."""
+        data = asdict(self)
+        data.pop("api_key", None)
+        return data
 
 
 class ProviderConfigStore:
@@ -85,7 +161,13 @@ class ProviderConfigStore:
     ``~/.personal_ai/profiles.json`` (on Windows ``C:\\Users\\<you>\\.personal_ai``).
     """
 
-    def __init__(self, path: Path | str | None = None):
+    def __init__(
+        self,
+        path: Path | str | None = None,
+        *,
+        vault: Any | None = None,
+    ):
+        self.vault = vault or SecretVault
         if path is not None:
             self.path = Path(path)
             return
@@ -106,12 +188,29 @@ class ProviderConfigStore:
         except (OSError, json.JSONDecodeError):
             return {"active": None, "profiles": {}}
         profiles = {}
+        migrated = False
         for name, data in (raw.get("profiles") or {}).items():
             try:
-                profiles[name] = ProviderProfile(**data)
+                profile_data = dict(data)
+                legacy_secret = str(profile_data.pop("api_key", "") or "")
+                secret_ref = str(profile_data.get("secret_ref") or "")
+                if legacy_secret:
+                    if not self.vault.set(name, legacy_secret):
+                        raise RuntimeError(
+                            f"provider profile {name!r} contains a legacy plaintext key, "
+                            "but the OS keyring is unavailable; the file was left unchanged"
+                        )
+                    secret_ref = name
+                    profile_data["secret_ref"] = secret_ref
+                    migrated = True
+                key = self.vault.get(secret_ref) if secret_ref else None
+                profiles[name] = ProviderProfile(api_key=key or "", **profile_data)
             except (TypeError, ValueError):
                 continue  # skip corrupt entries rather than fail the whole store
-        return {"active": raw.get("active"), "profiles": profiles}
+        active = raw.get("active")
+        if migrated:
+            self._save(profiles, active)
+        return {"active": active, "profiles": profiles}
 
     # -- write -------------------------------------------------------------
 
@@ -124,11 +223,17 @@ class ProviderConfigStore:
             pass
         payload = {
             "active": active,
-            "profiles": {name: p.to_dict() for name, p in sorted(profiles.items())},
+            "profiles": {
+                name: p.to_storage_dict() for name, p in sorted(profiles.items())
+            },
         }
         tmp = self.path.with_suffix(".tmp")
         tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
         tmp.replace(self.path)
+        try:
+            os.chmod(self.path, 0o600)
+        except OSError:
+            pass
 
     # -- operations --------------------------------------------------------
 
@@ -149,6 +254,13 @@ class ProviderConfigStore:
         return self.load()["active"]
 
     def add(self, profile: ProviderProfile, *, activate: bool = True) -> None:
+        _validate_base_url(profile.base_url, profile.name)
+        if profile.api_key:
+            if not self.vault.set(profile.name, profile.api_key):
+                raise RuntimeError(
+                    "OS keyring is unavailable; refusing to store an API key in plaintext"
+                )
+            profile.secret_ref = profile.name
         data = self.load()
         data["profiles"][profile.name] = profile
         if activate or data["active"] is None:
@@ -160,9 +272,19 @@ class ProviderConfigStore:
         profile = data["profiles"].get(name)
         if profile is None:
             return None
+        new_key = fields.pop("api_key", None)
+        if new_key is not None:
+            if new_key and not self.vault.set(name, str(new_key)):
+                raise RuntimeError(
+                    "OS keyring is unavailable; refusing to store an API key in plaintext"
+                )
+            profile.api_key = str(new_key)
+            profile.secret_ref = name if new_key else ""
         for key, value in fields.items():
             if value is not None and hasattr(profile, key):
                 setattr(profile, key, value)
+        if "base_url" in fields:
+            _validate_base_url(profile.base_url, profile.name)
         profile.updated_at = _now()
         self._save(data["profiles"], data["active"])
         return profile
@@ -179,6 +301,9 @@ class ProviderConfigStore:
         data = self.load()
         if name not in data["profiles"]:
             return False
+        profile = data["profiles"][name]
+        if profile.secret_ref:
+            self.vault.delete(profile.secret_ref)
         del data["profiles"][name]
         if data["active"] == name:
             data["active"] = next(iter(data["profiles"]), None)

@@ -1,0 +1,43 @@
+{
+  "name": "AI-Agent-Harness CLI Upgrade Plan",
+  "date": "2026-08-11",
+  "target": "EIA2024/AI-Agent-Harness",
+  "entry": "README.md",
+  "execution_protocol": "00_EXECUTION_PROTOCOL.md",
+  "phases": {
+    "0": [
+      "01_CURRENT_STATE_AUDIT.md",
+      "15_TESTING_QUALITY_GATES.md",
+      "16_MIGRATION_COMPATIBILITY.md"
+    ],
+    "1": [
+      "05_TARGET_TECHNICAL_ARCHITECTURE.md",
+      "08_STREAMING_EVENT_RENDERER.md",
+      "12_NON_INTERACTIVE_AUTOMATION.md"
+    ],
+    "2": [
+      "06_TUI_VISUAL_SPEC.md",
+      "07_INTERACTION_COMMAND_KEYMAP.md",
+      "ADR/ADR-001-tui-framework.md"
+    ],
+    "3": [
+      "09_APPROVAL_POLICY_SECURITY_UX.md",
+      "10_SESSION_CONTEXT_MEMORY_UX.md",
+      "11_TOOL_DIFF_ARTIFACT_UX.md"
+    ],
+    "4": [
+      "08_STREAMING_EVENT_RENDERER.md",
+      "ADR/ADR-002-event-model.md"
+    ],
+    "5": [
+      "13_CONFIGURATION_PROVIDER_MCP.md",
+      "14_OBSERVABILITY_DIAGNOSTICS.md"
+    ],
+    "6": [
+      "02_FIRST_PRINCIPLES.md",
+      "09_APPROVAL_POLICY_SECURITY_UX.md"
+    ]
+  },
+  "task_cards": "18_AGENT_TASK_CARDS.md",
+  "acceptance": "19_ACCEPTANCE_CHECKLIST.md"
+}

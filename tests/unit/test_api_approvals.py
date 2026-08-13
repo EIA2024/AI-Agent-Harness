@@ -9,9 +9,10 @@ import pytest
 from personal_ai_os.db.models import Approval, Run, User
 from personal_ai_os.db.session import session_scope
 from personal_ai_os.gateway.services import ServiceContainer
+from personal_ai_os.policy_engine.approval import ApprovalEngine
 
 
-class FakeApprovalEngine:
+class RecordingApprovalEngine(ApprovalEngine):
     def __init__(self):
         self.resolved: list[dict] = []
 
@@ -24,7 +25,12 @@ class FakeApprovalEngine:
                 "edited_arguments": edited_arguments,
             }
         )
-        return {"ok": True}
+        return await super().resolve(
+            approval_id,
+            decision=decision,
+            approved_by=approved_by,
+            edited_arguments=edited_arguments,
+        )
 
 
 async def _make_user(api_key: str) -> User:
@@ -59,7 +65,7 @@ async def _make_approval(owner_id, *, status: str = "pending", risk: int = 3) ->
 
 @pytest.mark.asyncio
 async def test_list_pending_and_approve(make_api, db):
-    engine = FakeApprovalEngine()
+    engine = RecordingApprovalEngine()
     user = await _make_user("approve-key")
     approval = await _make_approval(user.id)
     headers = {"X-API-Key": "approve-key"}
@@ -93,7 +99,7 @@ async def test_reject(make_api, db):
     approval = await _make_approval(user.id)
     headers = {"X-API-Key": "approve-key"}
 
-    async with make_api(services=ServiceContainer()) as ac:
+    async with make_api(services=ServiceContainer(approval_engine=ApprovalEngine())) as ac:
         r = await ac.post(f"/v1/approvals/{approval.id}/reject", headers=headers)
         assert r.status_code == 200
         assert r.json()["status"] == "rejected"
@@ -101,7 +107,7 @@ async def test_reject(make_api, db):
 
 @pytest.mark.asyncio
 async def test_edit_approves_with_edited_arguments(make_api, db):
-    engine = FakeApprovalEngine()
+    engine = RecordingApprovalEngine()
     user = await _make_user("approve-key")
     approval = await _make_approval(user.id)
     headers = {"X-API-Key": "approve-key"}
@@ -114,7 +120,7 @@ async def test_edit_approves_with_edited_arguments(make_api, db):
         )
         assert r.status_code == 200, r.text
         body = r.json()
-        assert body["status"] == "approved"
+        assert body["status"] == "edited"
         assert body["arguments_preview"] == {"to": "new@example.com", "subject": "edited"}
         assert engine.resolved[0]["edited_arguments"] == {"to": "new@example.com", "subject": "edited"}
 
@@ -125,7 +131,7 @@ async def test_approval_owner_isolation(make_api, db):
     user_b = await _make_user("b-key")
     approval = await _make_approval(user_a.id)
 
-    async with make_api(services=ServiceContainer()) as ac:
+    async with make_api(services=ServiceContainer(approval_engine=ApprovalEngine())) as ac:
         # B cannot see or act on A's approval
         pending_b = await ac.get("/v1/approvals", headers={"X-API-Key": "b-key"})
         assert all(a["id"] != str(approval.id) for a in pending_b.json())
@@ -136,3 +142,17 @@ async def test_approval_owner_isolation(make_api, db):
         # A can
         r2 = await ac.post(f"/v1/approvals/{approval.id}/approve", headers={"X-API-Key": "a-key"})
         assert r2.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_missing_approval_engine_fails_closed(make_api, db):
+    user = await _make_user("missing-engine-key")
+    approval = await _make_approval(user.id)
+
+    async with make_api(services=ServiceContainer()) as ac:
+        response = await ac.post(
+            f"/v1/approvals/{approval.id}/approve",
+            headers={"X-API-Key": "missing-engine-key"},
+        )
+
+    assert response.status_code == 503

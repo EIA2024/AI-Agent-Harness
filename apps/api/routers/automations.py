@@ -103,13 +103,17 @@ async def run_automation(
         a = result.scalar_one_or_none()
         if a is None:
             raise HTTPException(status_code=404, detail="Automation not found")
-        a.last_run_at = datetime.now(UTC)
-        await s.flush()
 
     if services.scheduler is None:
         raise HTTPException(
             status_code=501,
             detail="Scheduler is not wired up; automation execution is not implemented",
         )
+    # P1-034: only record the attempt once execution is actually possible.
+    async with session_scope() as s:
+        a = await s.get(Automation, automation_id)
+        if a is not None:
+            a.last_run_at = datetime.now(UTC)
+            await s.flush()
     await services.scheduler.run(automation_id=automation_id, owner_id=user.id)
     return {"id": str(automation_id), "status": "triggered"}

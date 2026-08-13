@@ -21,10 +21,15 @@ def _to_dict(tool) -> dict:
 
 @router.get("")
 async def list_tools(user=Depends(resolve_user), services=Depends(get_services)) -> list[dict]:
-    """List all registered tools as descriptors (empty when no registry)."""
+    """List tools visible to the caller (P1-014 owner capability filter)."""
     registry = services.tool_registry
     if registry is None:
         return []
+
+    capabilities = getattr(services, "capabilities", None)
+    if capabilities is not None:
+        result = capabilities.visible_tools(user.id)
+        return [_to_dict(t) for t in result]
 
     # ToolRegistry exposes list_all(); tolerate list_tools() for duck-typed registries.
     if hasattr(registry, "list_all"):

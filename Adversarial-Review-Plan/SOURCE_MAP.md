@@ -1,0 +1,12 @@
+# AI-Agent-Harness 对抗性代码审查与修复计划
+
+- Repository: `https://github.com/EIA2024/AI-Agent-Harness`
+- Branch: `cli-v2-upgrade`
+- Reviewed tree SHA: `4db7ba12fd1e4c09e4b9539dc0850345c72e96ad`
+- Review date: 2026-08-12
+- 目标执行模型: DeepSeek（因此任务卡故意写得冗余、显式、可验证）
+
+> 结论分级：`VERIFIED` 表示可由当前分支代码直接证明；`PROJECTED` 表示当前设计在指定扩展条件下高概率出问题。不要把 PROJECTED 当成线上已发生事故。
+> 本包是 adversarial review，不承诺数学意义上的“所有 bug”，但覆盖了当前可见主链：API → Runner → LangGraph → ToolBroker/Policy/Approval → Connectors → Context/Memory → DB → SSE/CLI → Deploy。
+
+## Source Map（本次审查重点文件）\n\n- `src/personal_ai_os/agent_runtime/graph.py` — decide/observe/tool/approval/context cache/tool result preview。\n- `src/personal_ai_os/agent_runtime/runner.py` — checkpoint、resume、持久化去重、stream/background。\n- `src/personal_ai_os/policy_engine/approval.py` — approval hash binding。\n- `src/personal_ai_os/policy_engine/engine.py` — R0–R4 policy。\n- `src/personal_ai_os/policy_engine/credentials.py` — global env secret。\n- `src/personal_ai_os/tool_broker/broker.py` — policy boundary、result sanitization、audit、test_tool。\n- `connectors/filesystem/connector.py` — FS sandbox/resource limits。\n- `connectors/http_fetch/connector.py` — HTTP capability/SSRF。\n- `src/personal_ai_os/context_engine/engine.py` — trust/memory/system prompt。\n- `src/personal_ai_os/model_gateway/provider.py` — reasoning_content、stream、tool alias、base URL。\n- `src/personal_ai_os/model_gateway/config.py` — provider secret storage。\n- `apps/api/routers/approvals.py`, `runs.py`, `messages.py`, `stream.py` — owner/state/SSE contracts。\n- `apps/api/main.py`, `deps.py`, `schemas.py` — CORS/auth/limits/readiness。\n- `src/personal_ai_os/db/models.py`, `db/session.py`, `migrations/` — constraints/migrations/fallback。\n- `src/personal_ai_os/gateway/services.py` — wiring/degraded mode/production InMemorySaver path。\n- `src/personal_ai_os/scheduler/event_bus.py`, `agent_runtime/streams.py` — in-process correctness boundary。\n- `deploy/compose/docker-compose.yml` — insecure defaults。\n- `tests/unit/test_graph.py`, `tests/integration/cli/test_approval_real_engine.py` — 现有测试盲区。\n- `docs/agent-memory/001-cli-v2-upgrade-report.md`, `CLI-Upgrade-Plan/` — 原设计目标/已知限制。\n\nReviewed tree SHA: `4db7ba12fd1e4c09e4b9539dc0850345c72e96ad`。DeepSeek 开始执行前必须确认 HEAD；如变化，重新验证 VERIFIED 结论。\n

@@ -13,14 +13,14 @@ from pydantic import BaseModel, Field
 
 class SessionCreate(BaseModel):
     project_id: UUID | None = None
-    title: str | None = None
-    channel: str = "api"
+    title: str | None = Field(default=None, max_length=200)
+    channel: str = Field(default="api", max_length=32)
 
 
 class SessionUpdate(BaseModel):
-    title: str | None = None
+    title: str | None = Field(default=None, max_length=200)
     project_id: UUID | None = None
-    status: str | None = None
+    status: str | None = Field(default=None, max_length=32)
 
 
 # ---------------------------------------------------------------------------
@@ -29,7 +29,7 @@ class SessionUpdate(BaseModel):
 
 
 class MessageCreate(BaseModel):
-    text: str
+    text: str = Field(..., max_length=200_000)
     attachments: list[dict] | None = None
 
 

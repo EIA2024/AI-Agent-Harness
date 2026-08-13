@@ -13,6 +13,11 @@ from dataclasses import dataclass
 from typing import Any
 
 logger = logging.getLogger(__name__)
+_CHECKPOINTER_CONTEXTS: list[Any] = []
+
+
+def _production() -> bool:
+    return os.environ.get("APP_ENV", "development").lower() == "production"
 
 
 @dataclass
@@ -24,6 +29,7 @@ class ServiceContainer:
     model_provider: Any = None
     tool_registry: Any = None
     tool_broker: Any = None
+    capabilities: Any = None
     policy_engine: Any = None
     approval_engine: Any = None
     credential_broker: Any = None
@@ -39,6 +45,8 @@ def _lazy(factory):
     try:
         return factory()
     except Exception as exc:  # noqa: BLE001 - a missing sibling department is expected
+        if _production():
+            raise
         logger.warning("Service %s unavailable: %s", getattr(factory, "__name__", factory), exc)
         return None
 
@@ -110,6 +118,10 @@ def build_default_services() -> ServiceContainer:
         from personal_ai_os.tool_broker import ToolBroker
 
         connectors = get_builtin_connectors()
+        # P1-014: owner-aware tool visibility (deny-sets plug in here).
+        from personal_ai_os.gateway.capabilities import CapabilityService
+
+        container.capabilities = CapabilityService(container.tool_registry)
         return ToolBroker(
             registry=container.tool_registry,
             policy_engine=container.policy_engine,
@@ -118,6 +130,7 @@ def build_default_services() -> ServiceContainer:
             event_bus=container.event_bus,
             approval_engine=container.approval_engine,
             audit_logger=container.audit_logger,
+            capabilities=container.capabilities,
         )
 
     container.tool_broker = _lazy(_tool_broker)
@@ -218,6 +231,8 @@ async def complete_wiring(container: ServiceContainer) -> ServiceContainer:
             for connector in get_builtin_connectors():
                 await container.tool_broker.register_connector(connector)
         except Exception as exc:  # noqa: BLE001
+            if _production():
+                raise
             logger.warning("Connector registration failed: %s", exc)
 
     if (
@@ -243,8 +258,57 @@ async def complete_wiring(container: ServiceContainer) -> ServiceContainer:
                 policy_engine=container.policy_engine,
                 approval_engine=container.approval_engine,
                 event_bus=container.event_bus,
+                # P0-005: a persistent checkpointer so approval/interrupt state
+                # survives a server restart (never InMemorySaver in production).
+                checkpointer=await _open_persistent_checkpointer(),
             )
         except Exception as exc:  # noqa: BLE001
+            if _production():
+                raise
             logger.warning("Runner wiring failed: %s", exc)
 
+    if _production() and container.runner is None:
+        raise RuntimeError("production service wiring is incomplete: runner unavailable")
+
     return container
+
+
+async def _open_persistent_checkpointer():
+    """Open a durable checkpointer appropriate for the deployment mode.
+
+    The saver stays open for the process lifetime (LangGraph async saver);
+    its ``__aexit__`` would close the connection, so we enter it explicitly.
+    """
+    if _production():
+        database_url = os.environ.get("DATABASE_URL", "")
+        if not database_url.startswith(("postgresql://", "postgresql+asyncpg://")):
+            raise RuntimeError("production checkpointer requires PostgreSQL DATABASE_URL")
+        from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+
+        psycopg_url = database_url.replace("postgresql+asyncpg://", "postgresql://", 1)
+        checkpointer_cm = AsyncPostgresSaver.from_conn_string(psycopg_url)
+        saver = await checkpointer_cm.__aenter__()
+        await saver.setup()
+        _CHECKPOINTER_CONTEXTS.append(checkpointer_cm)
+        logger.info("persistent checkpointer: PostgreSQL")
+        return saver
+
+    from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+
+    data_dir = os.environ.get(
+        "PERSONAL_AI_DATA_DIR", os.path.join(os.path.expanduser("~"), ".personal_ai")
+    )
+    os.makedirs(data_dir, exist_ok=True)
+    path = os.path.join(data_dir, "checkpoints.sqlite")
+    checkpointer_cm = AsyncSqliteSaver.from_conn_string(path)
+    saver = await checkpointer_cm.__aenter__()
+    _CHECKPOINTER_CONTEXTS.append(checkpointer_cm)
+    logger.info("persistent checkpointer: %s", path)
+    return saver
+
+
+async def close_checkpointers() -> None:
+    """Close process-lifetime checkpointer contexts during app shutdown."""
+    while _CHECKPOINTER_CONTEXTS:
+        context = _CHECKPOINTER_CONTEXTS.pop()
+        await context.__aexit__(None, None, None)

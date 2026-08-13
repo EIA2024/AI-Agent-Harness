@@ -58,6 +58,20 @@ _SENSITIVE_PATTERNS: list[re.Pattern] = [
 ]
 
 
+#: Keys whose values are treated as secrets regardless of content (P2-002).
+_SECRET_KEYS = {
+    "api_key", "apikey", "secret", "token", "password", "passwd", "access_token",
+    "refresh_token", "authorization", "client_secret", "private_key", "id_rsa",
+    "cookie", "session_token", "credential", "x-api-key",
+}
+
+#: Substrings that mark a string value as secret-looking (needs regex sanitize).
+_SECRET_VALUE_MARKERS = (
+    "sk-", "bearer", "-----begin", "ghp_", "gho_", "ghu_", "ghs_", "ghr_",
+    "aiza", "xoxb", "xoxp", "xoxa", "xoxr", "xoxs",
+)
+
+
 class LogSanitizer:
     """Redacts sensitive values from any string destined for logs/audit."""
 
@@ -68,29 +82,37 @@ class LogSanitizer:
         return text
 
     @classmethod
-    def sanitize_dict(cls, value: dict) -> dict:
-        """Deep-sanitize a dict, redacting known secret keys and secret-looking values."""
-        SECRET_KEYS = {"api_key", "apikey", "secret", "token", "password", "passwd",
-                       "access_token", "refresh_token", "authorization", "client_secret",
-                       "private_key", "id_rsa", "cookie", "session_token"}
-        result: dict = {}
-        for k, v in value.items():
-            if isinstance(k, str) and k.lower() in SECRET_KEYS:
-                result[k] = "[REDACTED]"
-            elif isinstance(v, dict):
-                result[k] = cls.sanitize_dict(v)
-            elif isinstance(v, list):
-                result[k] = [cls.sanitize_dict(i) if isinstance(i, dict) else i for i in v]
-            elif isinstance(v, str) and len(v) > 0:
-                lowered = v
-                if any(m in lowered.lower() for m in ("sk-", "bearer", "-----begin", "ghp_",
-                                                      "gho_", "ghu_", "ghs_", "ghr_", "aiza")):
-                    result[k] = cls.sanitize(v)
+    def sanitize_value(cls, value: Any, *, _depth: int = 0) -> Any:
+        """Recursively redact secrets inside dict/list/tuple/str (P2-002).
+
+        Unlike the old ``sanitize_dict``, strings INSIDE lists are sanitized too
+        (e.g. ``{"headers": ["Authorization: Bearer sk-xyz"]}``). A depth guard
+        bounds pathological nesting so a hostile payload cannot trigger a DoS.
+        """
+        if _depth > 10:
+            return value
+        if isinstance(value, dict):
+            out: dict = {}
+            for k, v in value.items():
+                if isinstance(k, str) and k.lower() in _SECRET_KEYS:
+                    out[k] = "[REDACTED]"
                 else:
-                    result[k] = v
-            else:
-                result[k] = v
-        return result
+                    out[k] = cls.sanitize_value(v, _depth=_depth + 1)
+            return out
+        if isinstance(value, list):
+            return [cls.sanitize_value(i, _depth=_depth + 1) for i in value]
+        if isinstance(value, tuple):
+            return tuple(cls.sanitize_value(i, _depth=_depth + 1) for i in value)
+        if isinstance(value, str) and len(value) > 0:
+            if any(m in value.lower() for m in _SECRET_VALUE_MARKERS):
+                return cls.sanitize(value)
+            return value
+        return value
+
+    @classmethod
+    def sanitize_dict(cls, value: dict) -> dict:
+        """Deep-sanitize a dict, redacting known secret keys and values."""
+        return cls.sanitize_value(value)
 
 
 def format_untrusted(source: str) -> str:

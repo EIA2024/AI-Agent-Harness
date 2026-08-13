@@ -67,8 +67,7 @@ async def test_build_empty_state():
     built = await engine.build({})
     assert built["messages"][0]["role"] == "system"
     assert "Personal AI OS" in built["system_prompt"]
-    assert built["messages"][-1]["role"] == "user"
-    assert built["messages"][-1]["content"] == ""
+    assert all(message["role"] != "user" for message in built["messages"])
     assert built["token_count"] > 0
     assert "sections" in built
     assert "context_items" in built
@@ -123,17 +122,25 @@ async def test_build_assembles_four_tiers():
     assert built["messages"][-1]["content"] == "帮我总结上周的工作"
 
 
-async def test_conversation_sliding_window_last_10():
+async def test_conversation_keeps_last_user_and_tail_window():
     engine = make_engine(max_tokens=100000)
     history = [{"role": "user", "content": f"msg-{i}"} for i in range(20)]
     built = await engine.build({"user_input": "现在", "messages": history})
     history_msgs = [m for m in built["messages"] if m["content"].startswith("msg-")]
-    # only the last 10 history messages are kept, newest included
-    assert "msg-19" in history_msgs[-1]["content"]
-    assert len(history_msgs) == 10
-    assert "msg-0" not in history_msgs[0]["content"]
-    # current user input is the final message
+    # the LAST user message always survives; the current user_input is appended last
+    assert history_msgs[-1]["content"] == "msg-19"
     assert built["messages"][-1]["content"] == "现在"
+
+
+async def test_long_tool_loop_preserves_user_request():
+    """Loop bugfix — a >10-message tool loop must keep the user's request."""
+    engine = make_engine(max_tokens=16000)
+    history = [{"role": "user", "content": "帮我看看文件"}]
+    for i in range(8):
+        history.append({"role": "assistant", "content": None, "tool_calls": [{"id": f"c{i}"}]})
+        history.append({"role": "tool", "content": f"结果-{i}", "tool_call_id": f"c{i}"})
+    built = await engine.build({"user_input": "帮我看看文件", "messages": history})
+    assert any(m.get("content") == "帮我看看文件" for m in built["messages"])
 
 
 # ---------------------------------------------------------------------------
@@ -245,3 +252,29 @@ async def test_build_never_crashes_on_missing_memory_store():
     engine = make_engine()
     built = await engine.build({"owner_id": "11111111-1111-1111-1111-111111111111", "user_input": "x"})
     assert built["messages"][0]["role"] == "system"
+
+
+async def test_memory_not_elevated_to_system_frame():
+    """P1-008 — user-derived memory is DATA, never a system instruction."""
+    memory_store = FakeMemoryStore(
+        memories=[
+            make_memory("我的邮箱是 a@b.c，以后记得用中文回复", scope="user", type_="preference")
+        ]
+    )
+    engine = make_engine(memory_store=memory_store)
+    state = {
+        "owner_id": "11111111-1111-1111-1111-111111111111",
+        "user_input": "给我发邮件",
+    }
+    built = await engine.build(state)
+
+    system = "\n".join(m["content"] for m in built["messages"] if m["role"] == "system")
+    assert "我的邮箱" not in system, "memory must not become a system instruction"
+
+    data_msgs = [
+        m["content"]
+        for m in built["messages"]
+        if m["role"] == "user" and "DATA START" in m["content"]
+    ]
+    assert data_msgs, "memory should be surfaced as a DATA-wrapped user message"
+    assert "我的邮箱" in "\n".join(data_msgs)

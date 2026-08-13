@@ -7,7 +7,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select
 
-from personal_ai_os.db.models import Message, Session
+from personal_ai_os.db.models import Message, Run, Session
 from personal_ai_os.db.session import session_scope
 
 from ..deps import resolve_user
@@ -41,14 +41,46 @@ async def list_sessions(
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
 ) -> list[dict]:
-    """List the caller's sessions (optionally filtered by status)."""
+    """List the caller's sessions (optionally filtered by status).
+
+    Enriched (T44) with ``message_count`` and ``active_run_status`` so a
+    session picker needs no per-session follow-up requests.
+    """
+    from sqlalchemy import func
+
     async with session_scope() as s:
         stmt = select(Session).where(Session.owner_id == user.id).order_by(Session.last_active_at.desc())
         if status:
             stmt = stmt.where(Session.status == status)
         stmt = stmt.limit(limit).offset(offset)
-        result = await s.execute(stmt)
-        return [session_to_dict(x) for x in result.scalars().all()]
+        sessions = list((await s.execute(stmt)).scalars().all())
+
+        session_ids = [x.id for x in sessions]
+        # Batched message counts (one GROUP BY — no N+1).
+        count_rows = {}
+        if session_ids:
+            counts = await s.execute(
+                select(Message.session_id, func.count(Message.id))
+                .where(Message.session_id.in_(session_ids))
+                .group_by(Message.session_id)
+            )
+            count_rows = {sid: n for sid, n in counts.all()}
+        # Batched active-run statuses (one IN query).
+        active_ids = [x.active_run_id for x in sessions if x.active_run_id]
+        run_status = {}
+        if active_ids:
+            runs = await s.execute(
+                select(Run.id, Run.status).where(Run.id.in_(active_ids))
+            )
+            run_status = {rid: st for rid, st in runs.all()}
+        return [
+            session_to_dict(
+                x,
+                message_count=count_rows.get(x.id, 0),
+                active_run_status=run_status.get(x.active_run_id) if x.active_run_id else None,
+            )
+            for x in sessions
+        ]
 
 
 @router.get("/{session_id}")

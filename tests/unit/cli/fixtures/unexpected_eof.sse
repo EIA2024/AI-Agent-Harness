@@ -1,0 +1,5 @@
+event: run.started
+data: {"run_id": "r1"}
+
+event: text.delta
+data: {"text": "partial answer, connection dropped"}

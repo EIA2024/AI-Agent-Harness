@@ -6,6 +6,31 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added — CLI v2 (2026-08-12)
+
+- **Packaging** — `personal-ai` console script; CLI moved into the installable
+  `personal_ai_os.cli` package (`apps/cli/main.py` is a compatibility shim).
+- **Headless** — `personal-ai exec` with `text` / `json` / `stream-json`
+  outputs, strict stdout/stderr separation, stable exit codes.
+- **Admin commands** — `sessions`, `runs`, `approvals`, `memories`, `tools`,
+  `audit`, `config` (list/show/use/edit/remove/path/sources/validate), `doctor`.
+- **Interactive TUI** — Textual app (status bar · transcript · composer), plain
+  non-TTY fallback, `--continue` / `--session` / `--pick` session resume,
+  approval modal (approve/reject/edit/cancel + resume), slash commands,
+  Ctrl+C cancel, Ctrl+O tool detail.
+- **Domain** — typed SSE decoder, UIEvent normalizer (raw-thinking suppressed,
+  live/replay unified), deterministic reducer/AppState, terminal sanitizer +
+  secret redactor, opt-in notifications.
+- **Server projection** — `GET /v1/runs` list; versioned SSE envelope
+  (`schema_version`/`event_id`/`seq`/`timestamp`/`run_id`); live tool lifecycle
+  events with stable `tool_call_id`; enriched `approval.required`; session list
+  metadata (`message_count`, `active_run_status`).
+
+### Changed
+
+- `personal-ai chat` / `send` / `approve` retained as deprecated aliases
+  (warnings on stderr). `runs get` aliases `runs show`.
+
 ## [0.1.0] - 2026-08-11
 
 Initial MVP release — a runnable Personal AI OS vertical slice.

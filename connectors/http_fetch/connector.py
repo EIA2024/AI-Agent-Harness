@@ -34,6 +34,12 @@ logger = logging.getLogger(__name__)
 DEFAULT_TIMEOUT = 10.0
 MAX_TIMEOUT = 30.0
 DEFAULT_MAX_RESPONSE_BYTES = 2 * 1024 * 1024  # 2 MiB
+_FORBIDDEN_CREDENTIAL_HEADERS = {
+    "authorization",
+    "cookie",
+    "proxy-authorization",
+    "x-api-key",
+}
 
 
 def _is_private_ip(ip_str: str) -> bool:
@@ -73,6 +79,48 @@ def _resolve_private(host: str) -> bool:
         if _is_private_ip(info[4][0]):
             return True
     return False
+
+
+def _resolves_to_mixed_private_public(host: str) -> bool:
+    """True when a hostname resolves to BOTH private and public addresses.
+
+    P1-012: a mix is a strong DNS-rebinding signal (the name answers privately
+    to us and publicly to the upstream) — block rather than let a single
+    resolution-time check be raced.
+    """
+    if host.lower() == "localhost":
+        return True
+    try:
+        ipaddress.ip_address(host)
+    except ValueError:
+        pass
+    else:
+        return False  # an IP literal is a single, pinned address
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except OSError:
+        return False
+    seen_private = any(_is_private_ip(info[4][0]) for info in infos)
+    seen_public = any(not _is_private_ip(info[4][0]) for info in infos)
+    return seen_private and seen_public
+
+
+def _resolve_addresses(host: str) -> list[str]:
+    """Resolve once and return unique addresses used for validation + pinning."""
+    try:
+        literal = ipaddress.ip_address(host)
+    except ValueError:
+        try:
+            infos = socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)
+        except OSError:
+            return []
+        return list(dict.fromkeys(str(info[4][0]) for info in infos))
+    return [str(literal)]
+
+
+def _pinned_request_url(url: str, address: str) -> str:
+    """Replace only the network destination, preserving scheme/path/query."""
+    return str(httpx.URL(url).copy_with(host=address))
 
 
 class _TextExtractor(HTMLParser):
@@ -121,9 +169,18 @@ def html_to_text(raw: str, max_chars: int = 8000) -> str:
 
 
 class HttpFetchConnector:
-    """Exposes the read-only ``http_fetch.fetch`` tool."""
+    """HTTP tools: read-only ``http_fetch.fetch`` + mutating ``http_request.mutate``.
+
+    P0-002: side-effecting HTTP verbs must NOT ride on a read-only descriptor.
+    ``fetch`` is GET/HEAD only (R1, auto-allowed); POST/PUT/PATCH/DELETE live on
+    ``http_request.mutate`` (R3 → requires approval), so an agent can never
+    silently write/delete to an external service without going through policy.
+    """
 
     connector_name = "http_fetch"
+
+    _READ_METHODS = ("GET", "HEAD")
+    _MUTATE_METHODS = ("POST", "PUT", "PATCH", "DELETE")
 
     def __init__(
         self,
@@ -140,13 +197,14 @@ class HttpFetchConnector:
         self.allow_private = allow_private
         self._transport = transport
 
-    def _build_descriptor(self) -> ToolDescriptor:
+    def _read_descriptor(self) -> ToolDescriptor:
         return ToolDescriptor(
             name="http_fetch.fetch",
             namespace="http_fetch",
             description=(
-                "Fetch a URL and return the HTTP status code plus response body text. "
-                "Read-only; redirects are not followed and private/loopback addresses are blocked."
+                "Fetch a URL with a read-only HTTP method (GET/HEAD) and return status + body text. "
+                "Redirects are not followed; private/loopback addresses are blocked. "
+                "For POST/PUT/PATCH/DELETE use http_request.mutate."
             ),
             input_schema={
                 "type": "object",
@@ -154,15 +212,15 @@ class HttpFetchConnector:
                     "url": {"type": "string", "description": "Absolute http(s) URL to fetch"},
                     "method": {
                         "type": "string",
-                        "enum": ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD"],
+                        "enum": ["GET", "HEAD"],
                         "default": "GET",
+                        "description": "Read-only methods only",
                     },
                     "headers": {
                         "type": "object",
                         "additionalProperties": {"type": "string"},
                         "default": {},
                     },
-                    "body": {"type": "string", "default": None},
                     "timeout": {"type": "number", "minimum": 0.1, "maximum": MAX_TIMEOUT, "default": DEFAULT_TIMEOUT},
                 },
                 "required": ["url"],
@@ -184,12 +242,54 @@ class HttpFetchConnector:
             idempotent=True,
             timeout_seconds=int(MAX_TIMEOUT),
             retry_policy="once",
-            tags=["http", "web", "fetch"],
+            tags=["http", "web", "fetch", "read"],
+            result_trust="untrusted_web",
+        )
+
+    def _mutate_descriptor(self) -> ToolDescriptor:
+        return ToolDescriptor(
+            name="http_request.mutate",
+            namespace="http_request",
+            description=(
+                "Send a side-effecting HTTP request (POST/PUT/PATCH/DELETE) to a URL. "
+                "Requires approval (R3); use http_fetch.fetch for read-only GET/HEAD."
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string", "description": "Absolute http(s) URL"},
+                    "method": {
+                        "type": "string",
+                        "enum": ["POST", "PUT", "PATCH", "DELETE"],
+                        "default": "POST",
+                    },
+                    "headers": {
+                        "type": "object",
+                        "additionalProperties": {"type": "string"},
+                        "default": {},
+                    },
+                    "body": {"type": "string", "default": None},
+                    "timeout": {"type": "number", "minimum": 0.1, "maximum": MAX_TIMEOUT, "default": DEFAULT_TIMEOUT},
+                },
+                "required": ["url"],
+                "additionalProperties": False,
+            },
+            risk_level=3,
+            side_effect=True,
+            # P1-013: not destructive-by-purpose (it is a general mutating
+            # request tool gated at R3/approval); a tool whose PRIMARY purpose
+            # is destruction would be destructive=True and R4.
+            destructive=False,
+            external_write=True,
+            idempotent=False,
+            timeout_seconds=int(MAX_TIMEOUT),
+            retry_policy="none",
+            tags=["http", "web", "write"],
             result_trust="untrusted_web",
         )
 
     async def list_tools(self) -> list[ToolDescriptor]:
-        return [self._build_descriptor()]
+        return [self._read_descriptor(), self._mutate_descriptor()]
 
     # ------------------------------------------------------------------
     # Security checks
@@ -204,6 +304,24 @@ class HttpFetchConnector:
                 return True
         return False
 
+    def _blocked_private_target(self, host: str) -> tuple[bool, bool]:
+        """Return ``(private, mixed)`` for the effective network transport.
+
+        A caller-injected transport (notably ``httpx.MockTransport``) owns DNS
+        and connection routing, so resolving the display hostname through the
+        host OS is both unrelated and non-deterministic. Literal private IPs and
+        localhost remain blocked regardless of transport.
+        """
+        literal_or_local = host.lower() == "localhost"
+        try:
+            ipaddress.ip_address(host)
+            literal_or_local = True
+        except ValueError:
+            pass
+        if self._transport is not None and not literal_or_local:
+            return False, False
+        return _resolve_private(host), _resolves_to_mixed_private_public(host)
+
     # ------------------------------------------------------------------
     # Execution
     # ------------------------------------------------------------------
@@ -214,20 +332,85 @@ class HttpFetchConnector:
         host = parsed.hostname
         if parsed.scheme not in ("http", "https") or not host:
             return ToolResult.fail(error=f"invalid URL: {url!r}", error_code="HTTP_URL_INVALID")
+        if parsed.username is not None or parsed.password is not None:
+            return ToolResult.fail(
+                error="credentials embedded in URLs are not allowed",
+                error_code="HTTP_CREDENTIALS_NOT_ALLOWED",
+            )
 
         if not self._host_allowed(host):
             logger.warning("http_fetch: domain %r not in allowlist", host)
             return ToolResult.fail(
                 error=f"domain {host!r} is not in the allowlist", error_code="DOMAIN_NOT_ALLOWED",
             )
-        if not self.allow_private and _resolve_private(host):
+        private_target, mixed_target = self._blocked_private_target(host)
+        if not self.allow_private and private_target:
             logger.warning("http_fetch: blocking SSRF target %r", host)
             return ToolResult.fail(
                 error=f"refusing to fetch private/loopback address: {host}", error_code="SSRF_BLOCKED",
             )
+        if not self.allow_private and mixed_target:
+            # P1-012: DNS-rebinding signal — resolves to private AND public.
+            logger.warning("http_fetch: blocking mixed-resolution host %r (DNS rebinding?)", host)
+            return ToolResult.fail(
+                error=f"refusing to fetch host with mixed private/public resolution: {host}",
+                error_code="SSRF_BLOCKED",
+            )
 
+        request_url = url
+        request_extensions: dict[str, Any] | None = None
+        pinned_host_header: str | None = None
+        if self._transport is None and not self.allow_private:
+            addresses = _resolve_addresses(host)
+            if not addresses:
+                return ToolResult.fail(
+                    error=f"could not resolve host: {host}", error_code="HTTP_DNS_ERROR"
+                )
+            # Validate every answer from the same lookup used to choose the
+            # connection target. The HTTP client then connects to that exact IP,
+            # closing the DNS check/use race.
+            if any(_is_private_ip(address) for address in addresses):
+                return ToolResult.fail(
+                    error=f"refusing to fetch private/loopback address: {host}",
+                    error_code="SSRF_BLOCKED",
+                )
+            request_url = _pinned_request_url(url, addresses[0])
+            pinned_host_header = host
+            if parsed.port is not None:
+                pinned_host_header += f":{parsed.port}"
+            request_extensions = {"sni_hostname": host}
+
+        short = tool.split(".")[-1] if "." in tool else tool
         method = str(arguments.get("method", "GET")).upper()
-        headers = arguments.get("headers") or {}
+        if short == "fetch":
+            if method not in self._READ_METHODS:
+                return ToolResult.fail(
+                    error=f"http_fetch.fetch is read-only; method {method} not allowed — use http_request.mutate",
+                    error_code="HTTP_METHOD_NOT_ALLOWED",
+                )
+        elif short == "mutate":
+            if method not in self._MUTATE_METHODS:
+                return ToolResult.fail(
+                    error=f"http_request.mutate requires a mutating method; got {method}",
+                    error_code="HTTP_METHOD_NOT_ALLOWED",
+                )
+        else:
+            return ToolResult.fail(error=f"unknown http tool: {tool}", error_code="UNKNOWN_TOOL")
+
+        headers = httpx.Headers(arguments.get("headers") or {})
+        forbidden = _FORBIDDEN_CREDENTIAL_HEADERS.intersection(
+            name.lower() for name in headers.keys()
+        )
+        if forbidden:
+            return ToolResult.fail(
+                error=(
+                    "credential-bearing headers are not accepted from model arguments: "
+                    + ", ".join(sorted(forbidden))
+                ),
+                error_code="HTTP_CREDENTIALS_NOT_ALLOWED",
+            )
+        if pinned_host_header is not None:
+            headers["Host"] = pinned_host_header
         body = arguments.get("body")
         timeout = min(float(arguments.get("timeout", self.default_timeout)), MAX_TIMEOUT)
 
@@ -243,7 +426,13 @@ class HttpFetchConnector:
             async with httpx.AsyncClient(**client_kwargs) as client:
                 try:
                     async with asyncio.timeout(timeout):
-                        response = await client.request(method, url, headers=headers, content=body)
+                        response = await client.request(
+                            method,
+                            request_url,
+                            headers=headers,
+                            content=body,
+                            extensions=request_extensions,
+                        )
                 except TimeoutError:
                     return ToolResult.fail(
                         error=f"request to {url!r} timed out after {timeout}s", error_code="HTTP_TIMEOUT",

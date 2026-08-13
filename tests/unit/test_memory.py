@@ -75,7 +75,7 @@ async def test_provenance_preserved(store, mem, user_run):
             source_event_id=run_id,
         )
     )
-    fetched = await store.get(created.id)
+    fetched = await store.get(created.id, owner_id=created.owner_id)
     assert fetched is not None
     assert fetched.source_type == "conversation"
     assert fetched.source_id == "run-abc"
@@ -100,16 +100,16 @@ async def test_forget_removes_from_retrieval(store, mem):
     owner_id = m.owner_id
     assert len(await store.search(MemoryQuery(owner_id=owner_id, query="Python"))) == 1
 
-    await store.forget(m.id)
+    await store.forget(m.id, owner_id=owner_id)
 
     assert len(await store.search(MemoryQuery(owner_id=owner_id, query="Python"))) == 0
-    assert await store.get(m.id) is None
+    assert await store.get(m.id, owner_id=owner_id) is None
     assert len(await store.list(owner_id=owner_id)) == 0
 
 
 async def test_forget_writes_audit_event(store, mem):
     m = await store.write(mem(content="用户喜欢Python"))
-    await store.forget(m.id)
+    await store.forget(m.id, owner_id=m.owner_id)
 
     async with session_scope() as session:
         events = (
@@ -124,13 +124,19 @@ async def test_forget_writes_audit_event(store, mem):
 
 async def test_update_fields(store, mem):
     m = await store.write(mem(content="用户喜欢Python", importance=0.5, confidence=0.9))
-    updated = await store.update(m.id, content="用户喜欢Python3", importance=0.95, sensitivity="private")
+    updated = await store.update(
+        m.id,
+        owner_id=m.owner_id,
+        content="用户喜欢Python3",
+        importance=0.95,
+        sensitivity="private",
+    )
     assert updated is not None
     assert updated.content == "用户喜欢Python3"
     assert updated.importance == 0.95
     assert updated.sensitivity == "private"
 
-    fetched = await store.get(m.id)
+    fetched = await store.get(m.id, owner_id=m.owner_id)
     assert fetched.content == "用户喜欢Python3"
     assert fetched.confidence == 0.9  # unchanged
 
@@ -186,7 +192,7 @@ async def test_web_injection_does_not_change_profile(store, mem, user_run):
     )
 
     # trusted profile is not overwritten
-    still = await store.get(trusted.id)
+    still = await store.get(trusted.id, owner_id=trusted.owner_id)
     assert still is not None
     assert still.content == "用户喜欢Python"
 
@@ -211,4 +217,20 @@ async def test_search_empty_query_returns_active(store, mem):
 
 
 async def test_get_returns_none_for_missing(store):
-    assert await store.get(uuid4()) is None
+    assert await store.get(uuid4(), owner_id=uuid4()) is None
+
+
+async def test_direct_id_operations_are_owner_scoped(store, mem):
+    memory = await store.write(mem(content="private owner memory"))
+    other_owner = uuid4()
+
+    assert await store.get(memory.id, owner_id=other_owner) is None
+    assert (
+        await store.update(memory.id, owner_id=other_owner, content="stolen")
+        is None
+    )
+    await store.forget(memory.id, owner_id=other_owner)
+
+    unchanged = await store.get(memory.id, owner_id=memory.owner_id)
+    assert unchanged is not None
+    assert unchanged.content == "private owner memory"

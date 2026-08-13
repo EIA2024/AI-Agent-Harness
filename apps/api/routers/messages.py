@@ -8,6 +8,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select
 
+from personal_ai_os.agent_runtime.runner import SessionBusyError
 from personal_ai_os.db.models import Message, Session
 from personal_ai_os.db.session import session_scope
 
@@ -51,20 +52,24 @@ async def post_message(
     # Prefer the non-blocking streaming start so the caller can subscribe to
     # the live SSE stream; fall back to the blocking start when unavailable.
     start_method = getattr(services.runner, "start_streaming", None)
-    if start_method is not None:
-        run_result = await start_method(
-            session_id=session_id,
-            owner_id=user.id,
-            user_input=body.text,
-            agent_id=agent_id,
-        )
-    else:
-        run_result = await services.runner.start(
-            session_id=session_id,
-            owner_id=user.id,
-            user_input=body.text,
-            agent_id=agent_id,
-        )
+    try:
+        if start_method is not None:
+            run_result = await start_method(
+                session_id=session_id,
+                owner_id=user.id,
+                user_input=body.text,
+                agent_id=agent_id,
+            )
+        else:
+            run_result = await services.runner.start(
+                session_id=session_id,
+                owner_id=user.id,
+                user_input=body.text,
+                agent_id=agent_id,
+            )
+    except SessionBusyError as exc:
+        # P1-009: one running run per session → new message while one is active.
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     run_id = UUID(str(run_result["run_id"]))
     run_status = run_result.get("status", "running")
 

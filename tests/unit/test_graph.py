@@ -2,6 +2,7 @@
 
 import uuid
 
+import pytest
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.types import Command
 
@@ -105,7 +106,7 @@ async def test_l2_task_generates_plan_before_tool():
     assert result["task"]["level"] == "L2"
     assert 2 <= len(result["plan"]) <= 4
     assert result["plan"][0]["id"].startswith("step-")
-    assert result["plan"][0]["status"] == "pending"
+    assert result["plan"][0]["status"] == "done"  # P1-029: executed step
     assert result["tool_results"][0]["tool_name"] == "search"
     assert result["final_response"] == "计划完成"
 
@@ -229,3 +230,240 @@ async def test_resume_with_edited_arguments():
     )
     executed_args = broker.calls[-1][1]
     assert executed_args == {"to": "new@x.com"}
+
+
+def test_tool_message_content_includes_data_preview():
+    """The model must see real content, not just the count summary."""
+    from personal_ai_os.agent_runtime.graph import _tool_message_content
+
+    entry = {
+        "text": "1859 entries",
+        "data": {
+            "path": ".",
+            "entries": [
+                {"name": "src", "path": "src", "is_dir": True},
+                {"name": "docs", "path": "docs", "is_dir": True},
+            ],
+        },
+    }
+    content = _tool_message_content(entry)
+    assert "1859 entries" in content
+    assert "src" in content and "docs" in content
+    # small listing fits the preview: no truncation warning
+    assert "truncated" not in content
+
+
+def test_tool_message_content_truncation_is_explicit_and_actionable():
+    """A huge listing must warn the model it is only a sample, not the full set."""
+    from personal_ai_os.agent_runtime.graph import _TRUNCATED_HINT, _tool_message_content
+
+    entry = {
+        "text": "2000 items",
+        "data": {"entries": [{"name": f"file-{i}.py", "path": f"file-{i}.py", "is_dir": False} for i in range(2000)]},
+    }
+    content = _tool_message_content(entry)
+    assert "file-0.py" in content          # sample items present
+    assert "file-1999.py" not in content   # tail omitted
+    assert "entries_total" in content      # model told the true count
+    assert _TRUNCATED_HINT in content      # model told it's incomplete + how to narrow
+    assert len(content) < 5000             # bounded
+
+
+def test_tool_message_content_bounded_for_huge_data():
+    from personal_ai_os.agent_runtime.graph import _tool_message_content
+
+    entry = {"text": "2000 items", "data": {"entries": [{"x": "y" * 200} for _ in range(1000)]}}
+    content = _tool_message_content(entry)
+    assert len(content) < 5000
+    assert "truncated" in content
+
+
+def test_tool_message_content_without_data():
+    from personal_ai_os.agent_runtime.graph import _tool_message_content
+
+    assert _tool_message_content({"text": "ok"}) == "ok"
+    assert _tool_message_content({"error": "boom"}) == "boom"
+
+
+async def test_invalid_tool_args_are_not_executed():
+    """P1-031 — bad arguments JSON must fail loudly, never execute with {}."""
+    bad_tool_call = {
+        "type": "function",
+        "id": "call-bad",
+        "function": {"name": "search", "arguments": "{bad json"},
+    }
+    compiled, provider, broker = build_compiled(
+        [
+            {"content": None, "tool_calls": [bad_tool_call]},
+            {"content": "收到错误", "tool_calls": None},
+        ]
+    )
+    initial = make_initial("查一下")
+    result = await compiled.ainvoke(initial, cfg(initial["run_id"]))
+
+    assert len(broker.calls) == 0  # the connector was NEVER invoked
+    failed = [t for t in result["tool_results"] if t.get("error_code") == "TOOL_ARGUMENT_PARSE_ERROR"]
+    assert failed
+    # observe folded the parse error into the transcript the model will see
+    assert "TOOL_ARGUMENT_PARSE_ERROR" in str(result["messages"])
+
+
+async def test_missing_owner_id_fails_fast():
+    """P1-032 — a run without identity must fail before any tool executes."""
+    compiled, _provider, _broker = build_compiled([{"content": "hi"}])
+    initial = make_initial("hi")
+    del initial["owner_id"]
+    with pytest.raises(ValueError, match="owner_id"):
+        await compiled.ainvoke(initial, cfg(initial["run_id"]))
+
+
+async def test_missing_run_id_fails_fast():
+    """P1-032 — no fabricated UUIDs for a missing run id."""
+    compiled, _provider, _broker = build_compiled([{"content": "hi"}])
+    initial = make_initial("hi")
+    del initial["run_id"]
+    with pytest.raises(ValueError, match="run_id"):
+        await compiled.ainvoke(initial, cfg(uuid.uuid4()))
+
+
+async def test_stream_break_after_first_token_does_not_retry():
+    """P1-016 — a stream that broke mid-output must not trigger a second model call."""
+    from types import SimpleNamespace
+
+    from personal_ai_os.agent_runtime import streams
+    from personal_ai_os.agent_runtime.graph import ModelStreamError, _Deps, _model_call
+    from personal_ai_os.common.models import ModelRequest, ModelResponse
+
+    run_id = str(uuid.uuid4())
+    streams.register(run_id)
+    try:
+        class BrokenStream:
+            def __init__(self):
+                self.complete_calls = 0
+
+            async def stream(self, request):
+                yield SimpleNamespace(type="text_delta", text="partial")
+                raise RuntimeError("connection lost")
+
+            async def complete(self, request):
+                self.complete_calls += 1
+                return ModelResponse(content="retried", tool_calls=None, model="fake", provider="fake")
+
+        provider = BrokenStream()
+        deps = _Deps(
+            context_engine=None, model_provider=provider, tool_broker=None,
+            memory_store=None, classifier=None, planner=None,
+        )
+        state = {
+            "run_id": run_id, "owner_id": "o", "session_id": "s", "agent_id": None,
+            "user_input": "x", "messages": [], "context_items": [], "task": {},
+            "plan": [], "current_step": 0, "tool_results": [], "pending_approval": None,
+            "memory_candidates": [], "skill_candidates": [], "status": "intake",
+            "error": {}, "model_usage": {},
+        }
+        with pytest.raises(ModelStreamError):
+            await _model_call(
+                deps, state,
+                ModelRequest(purpose="assistant", messages=[{"role": "user", "content": "x"}]),
+            )
+        assert provider.complete_calls == 0  # NO silent retry
+    finally:
+        streams.unregister(run_id)
+
+
+async def test_stream_break_before_first_token_retries_non_streaming():
+    """P1-016 — failing before any delta may safely fall back to complete()."""
+
+    from personal_ai_os.agent_runtime import streams
+    from personal_ai_os.agent_runtime.graph import _Deps, _model_call
+    from personal_ai_os.common.models import ModelRequest, ModelResponse
+
+    run_id = str(uuid.uuid4())
+    streams.register(run_id)
+    try:
+        class BrokenStream:
+            def __init__(self):
+                self.complete_calls = 0
+
+            async def stream(self, request):
+                if False:
+                    yield None  # make this an async generator
+                raise RuntimeError("connection refused")
+
+            async def complete(self, request):
+                self.complete_calls += 1
+                return ModelResponse(content="ok", tool_calls=None, model="fake", provider="fake")
+
+        provider = BrokenStream()
+        deps = _Deps(
+            context_engine=None, model_provider=provider, tool_broker=None,
+            memory_store=None, classifier=None, planner=None,
+        )
+        state = {"run_id": run_id, "owner_id": "o", "session_id": "s", "agent_id": None,
+                 "user_input": "x", "messages": [], "context_items": [], "task": {},
+                 "plan": [], "current_step": 0, "tool_results": [], "pending_approval": None,
+                 "memory_candidates": [], "skill_candidates": [], "status": "intake",
+                 "error": {}, "model_usage": {}}
+        response = await _model_call(
+            deps, state,
+            ModelRequest(purpose="assistant", messages=[{"role": "user", "content": "x"}]),
+        )
+        assert provider.complete_calls == 1
+        assert response.content == "ok"
+    finally:
+        streams.unregister(run_id)
+
+
+def test_result_trust_fails_closed_when_unknown():
+    """P1-007 — a tool result with no declared trust is untrusted, not trusted."""
+    from personal_ai_os.agent_runtime.graph import _serialize_tool_result
+    from personal_ai_os.common.models import ToolExecutionContext, ToolResult
+
+    pending = {"id": "c1", "function": {"name": "web.get", "arguments": '{"url": "x"}'}}
+    ctx = ToolExecutionContext(run_id=uuid.uuid4(), owner_id=uuid.uuid4())
+    res = _serialize_tool_result(
+        ToolResult.ok(text="web content"), pending, "web.get", ctx, {"url": "x"}, tool_trust=None
+    )
+    assert res["trust"] == "untrusted_tool"  # fail-closed
+
+    trusted = _serialize_tool_result(
+        ToolResult.ok(text="2"), pending, "calculator.evaluate", ctx, {"expression": "1+1"},
+        tool_trust="trusted_tool",
+    )
+    assert trusted["trust"] == "trusted_tool"
+
+
+async def test_plan_steps_mark_done_as_executed():
+    """P1-029 — plan steps transition pending→done and current_step advances."""
+    compiled, provider, broker = build_compiled(
+        [
+            {"content": None, "tool_calls": [tool_call("search", {"q": "project"})]},
+            {"content": "计划完成", "tool_calls": None},
+        ]
+    )
+    initial = make_initial("帮我整理这个项目并写学习指南")
+    result = await compiled.ainvoke(initial, cfg(initial["run_id"]))
+    assert result["task"]["level"] == "L2"
+    assert result["plan"]
+    # P1-029: the executed step is marked done and current_step advanced
+    assert result["plan"][0]["status"] == "done"
+    assert result["current_step"] >= 1
+
+
+async def test_identical_successful_call_is_blocked_not_repeated():
+    """Review §B — a repeated same-signature call must NOT re-execute the tool."""
+    same = tool_call("search", {"q": "python"})
+    compiled, provider, broker = build_compiled(
+        [
+            {"content": None, "tool_calls": [same]},
+            {"content": None, "tool_calls": [same]},  # identical repeat
+            {"content": "结果如上", "tool_calls": None},
+        ]
+    )
+    initial = make_initial("查 python")
+    result = await compiled.ainvoke(initial, cfg(initial["run_id"]))
+
+    assert len(broker.calls) == 1, "the connector must run only once"
+    blocked = [t for t in result["tool_results"] if t.get("error_code") == "TOOL_REPEAT_BLOCKED"]
+    assert blocked, "the repeated call must be surfaced as a repeat-block"
+    assert "请勿重复" in blocked[0]["error"]

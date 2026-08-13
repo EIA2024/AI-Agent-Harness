@@ -1,0 +1,996 @@
+{
+  "repo": "https://github.com/EIA2024/AI-Agent-Harness",
+  "branch": "cli-v2-upgrade",
+  "reviewed_sha": "4db7ba12fd1e4c09e4b9539dc0850345c72e96ad",
+  "tasks": [
+    {
+      "id": "P0-001",
+      "severity": "P0",
+      "classification": "VERIFIED",
+      "title": "observe 后未失效 _cached_context，工具结果可能根本没有进入下一轮 decide",
+      "files": [
+        "src/personal_ai_os/agent_runtime/graph.py"
+      ],
+      "depends_on": [],
+      "required_fix": "删除跨节点缓存或引入 context_revision/messages_revision；任何 messages/tool_results/approval/plan 改变都必须使缓存失效。最小补丁：observe/approval/rejection 返回 _cached_context=None；长期改为 ContextSnapshot(revision=...)。",
+      "acceptance": "真实 ContextEngine 的两轮模型测试：第二次 request 必须包含刚产生的 tool result；同一 search 不得无理由重复。",
+      "workflow": [
+        "prove_current_behavior",
+        "add_failing_regression_test",
+        "implement_minimal_fix",
+        "run_targeted_tests",
+        "run_full_tests_and_ruff",
+        "document_compat_and_rollback"
+      ]
+    },
+    {
+      "id": "P0-002",
+      "severity": "P0",
+      "classification": "VERIFIED",
+      "title": "HTTP connector 将 POST/PUT/PATCH/DELETE 错标成低风险只读工具",
+      "files": [
+        "connectors/http_fetch/connector.py",
+        "src/personal_ai_os/policy_engine/engine.py"
+      ],
+      "depends_on": [],
+      "required_fix": "拆工具：http_fetch.read 仅 GET/HEAD，R1；http_request.mutate 承载 POST/PUT/PATCH/DELETE，至少 R3 + approval。Registry 注册时增加 capability invariant validator，拒绝 mutating method + read-only metadata。",
+      "acceptance": "对每个 HTTP method 做 policy 集成测试；DELETE 未审批必须 403/approval_required，GET 正常自动执行。",
+      "workflow": [
+        "prove_current_behavior",
+        "add_failing_regression_test",
+        "implement_minimal_fix",
+        "run_targeted_tests",
+        "run_full_tests_and_ruff",
+        "document_compat_and_rollback"
+      ]
+    },
+    {
+      "id": "P0-003",
+      "severity": "P0",
+      "classification": "VERIFIED",
+      "title": "approved_with_edits 新参数 hash 计算后未持久化",
+      "files": [
+        "src/personal_ai_os/policy_engine/approval.py"
+      ],
+      "depends_on": [],
+      "required_fix": "resolve 必须在同一事务内写 arguments_preview=bound_args、argument_hash=bound_hash、status=edited、approved_by；receipt 与 DB 状态不可分叉。",
+      "acceptance": "真实 ApprovalEngine→Runner→Graph→ToolBroker→真实 fake connector 垂直测试；断言 connector 实际收到 edited args 且 ToolCall.status=success。",
+      "workflow": [
+        "prove_current_behavior",
+        "add_failing_regression_test",
+        "implement_minimal_fix",
+        "run_targeted_tests",
+        "run_full_tests_and_ruff",
+        "document_compat_and_rollback"
+      ]
+    },
+    {
+      "id": "P0-004",
+      "severity": "P0",
+      "classification": "VERIFIED",
+      "title": "审批 API/Runner 吞掉任意 resolve 异常并继续",
+      "files": [
+        "apps/api/routers/approvals.py",
+        "src/personal_ai_os/agent_runtime/runner.py"
+      ],
+      "depends_on": [],
+      "required_fix": "只允许显式幂等错误（AlreadyResolved 且 decision/actor/hash 完全相同）继续；其他异常失败关闭。创建 Typed ApprovalResolutionError/Conflict/Expired。API 不再直接兜底改 DB 安全字段。",
+      "acceptance": "故障注入：DB error、expired、wrong decision、second resolver；必须分别 5xx/409/410，且工具绝不执行。",
+      "workflow": [
+        "prove_current_behavior",
+        "add_failing_regression_test",
+        "implement_minimal_fix",
+        "run_targeted_tests",
+        "run_full_tests_and_ruff",
+        "document_compat_and_rollback"
+      ]
+    },
+    {
+      "id": "P0-005",
+      "severity": "P0",
+      "classification": "VERIFIED",
+      "title": "生产 Runner 默认 InMemorySaver，重启后审批/interrupt checkpoint 丢失",
+      "files": [
+        "src/personal_ai_os/agent_runtime/runner.py",
+        "src/personal_ai_os/gateway/services.py"
+      ],
+      "depends_on": [],
+      "required_fix": "生产必须使用持久化 checkpointer（Postgres/SQLite dev）；thread_id=run_id；启动时检查 waiting/running run 并恢复/标记 recoverable。禁止 prod 使用 InMemorySaver。",
+      "acceptance": "restart integration：工具触发 approval→杀进程→重启→approve/resume→仅执行一次并完成。",
+      "workflow": [
+        "prove_current_behavior",
+        "add_failing_regression_test",
+        "implement_minimal_fix",
+        "run_targeted_tests",
+        "run_full_tests_and_ruff",
+        "document_compat_and_rollback"
+      ]
+    },
+    {
+      "id": "P0-006",
+      "severity": "P0",
+      "classification": "VERIFIED",
+      "title": "部署默认 dev-key + 固定数据库口令 + PostgreSQL 端口外露",
+      "files": [
+        "deploy/compose/docker-compose.yml",
+        "apps/api/deps.py"
+      ],
+      "depends_on": [],
+      "required_fix": "compose 移除所有 secret 默认值；${VAR:?required}；Postgres 不 publish 5432，只用 internal network；API 默认 bind 127.0.0.1 或反代；启动 insecure-config detector。",
+      "acceptance": "CI compose config test：缺 secret 必须失败；端口扫描测试确认 DB 不对宿主开放；dev-key 被拒绝。",
+      "workflow": [
+        "prove_current_behavior",
+        "add_failing_regression_test",
+        "implement_minimal_fix",
+        "run_targeted_tests",
+        "run_full_tests_and_ruff",
+        "document_compat_and_rollback"
+      ]
+    },
+    {
+      "id": "P0-007",
+      "severity": "P0",
+      "classification": "VERIFIED",
+      "title": "CredentialBroker 是全局环境凭据，owner_id 未参与选择",
+      "files": [
+        "src/personal_ai_os/policy_engine/credentials.py",
+        "src/personal_ai_os/tool_broker/broker.py"
+      ],
+      "depends_on": [],
+      "required_fix": "CredentialVault key=(owner_id, scope)；tool visibility 同时按 owner capabilities 过滤；禁止 global env secret 在 multi-user 模式自动授予。单用户模式也要显式 owner binding。",
+      "acceptance": "创建 owner A/B，A 有 token、B 无；B 调 credential tool 必须 CREDENTIAL_ERROR，绝不能命中 A/global token。",
+      "workflow": [
+        "prove_current_behavior",
+        "add_failing_regression_test",
+        "implement_minimal_fix",
+        "run_targeted_tests",
+        "run_full_tests_and_ruff",
+        "document_compat_and_rollback"
+      ]
+    },
+    {
+      "id": "P0-008",
+      "severity": "P0",
+      "classification": "VERIFIED",
+      "title": "原始 reasoning_content 被作为 thinking.delta 持久化/重放",
+      "files": [
+        "src/personal_ai_os/model_gateway/provider.py",
+        "apps/api/routers/stream.py",
+        "src/personal_ai_os/agent_runtime/graph.py"
+      ],
+      "depends_on": [],
+      "required_fix": "provider opaque reasoning 只保留在调用协议需要的内部字段，不进入公共 Run.state/SSE。UI 只接收 model-generated progress summary 或固定阶段事件。对旧记录迁移/清理 thinking。",
+      "acceptance": "构造 reasoning_content=SECRET_COT；检查 DB、GET run、SSE、CLI JSONL 均不得出现。",
+      "workflow": [
+        "prove_current_behavior",
+        "add_failing_regression_test",
+        "implement_minimal_fix",
+        "run_targeted_tests",
+        "run_full_tests_and_ruff",
+        "document_compat_and_rollback"
+      ]
+    },
+    {
+      "id": "P1-001",
+      "severity": "P1",
+      "classification": "VERIFIED",
+      "title": "工具结果 structured data 未做总大小预算",
+      "files": [
+        "src/personal_ai_os/tool_broker/broker.py",
+        "connectors/filesystem/connector.py"
+      ],
+      "depends_on": [
+        "P0-001"
+      ],
+      "required_fix": "统一 ToolResultBudget：text bytes、data serialized bytes、items、depth；大结果写 ArtifactStore，只回 preview+artifact_ref+page cursor。",
+      "acceptance": "10万文件/命中结果压力测试；单 ToolResult 持久化尺寸必须低于配置上限。",
+      "workflow": [
+        "prove_current_behavior",
+        "add_failing_regression_test",
+        "implement_minimal_fix",
+        "run_targeted_tests",
+        "run_full_tests_and_ruff",
+        "document_compat_and_rollback"
+      ]
+    },
+    {
+      "id": "P1-002",
+      "severity": "P1",
+      "classification": "VERIFIED",
+      "title": "filesystem.list 的 max_depth 配置未实际 clamp",
+      "files": [
+        "connectors/filesystem/connector.py"
+      ],
+      "depends_on": [],
+      "required_fix": "effective_depth=min(requested,self.max_depth,HARD_MAX_DEPTH)；visited inode/realpath set；max_entries；deadline。",
+      "acceptance": "max_depth=100000 只能走 HARD_MAX；symlink-to-parent 不重复访问。",
+      "workflow": [
+        "prove_current_behavior",
+        "add_failing_regression_test",
+        "implement_minimal_fix",
+        "run_targeted_tests",
+        "run_full_tests_and_ruff",
+        "document_compat_and_rollback"
+      ]
+    },
+    {
+      "id": "P1-003",
+      "severity": "P1",
+      "classification": "VERIFIED",
+      "title": "filesystem.search 任意 Python regex + 同步执行，存在 ReDoS/事件循环阻塞",
+      "files": [
+        "connectors/filesystem/connector.py"
+      ],
+      "depends_on": [],
+      "required_fix": "默认 literal search；regex 作为显式 mode，使用安全引擎/子进程 deadline；所有 blocking FS 用 asyncio.to_thread；全局 scan budget。",
+      "acceptance": "并发 heartbeat + catastrophic regex；API event loop latency 不得被拖死。",
+      "workflow": [
+        "prove_current_behavior",
+        "add_failing_regression_test",
+        "implement_minimal_fix",
+        "run_targeted_tests",
+        "run_full_tests_and_ruff",
+        "document_compat_and_rollback"
+      ]
+    },
+    {
+      "id": "P1-004",
+      "severity": "P1",
+      "classification": "VERIFIED",
+      "title": "filesystem root 默认 os.getcwd()，安全边界由启动目录偶然决定",
+      "files": [
+        "connectors/__init__.py",
+        "src/personal_ai_os/gateway/services.py"
+      ],
+      "depends_on": [],
+      "required_fix": "prod 要求 PERSONAL_AI_WORKSPACE_ROOT；每 owner/session 可进一步子目录；启动打印 canonical root；无配置时 prod 禁用 filesystem。",
+      "acceptance": "从 /、/app、repo 根启动三组测试，实际 root 必须一致。",
+      "workflow": [
+        "prove_current_behavior",
+        "add_failing_regression_test",
+        "implement_minimal_fix",
+        "run_targeted_tests",
+        "run_full_tests_and_ruff",
+        "document_compat_and_rollback"
+      ]
+    },
+    {
+      "id": "P1-005",
+      "severity": "P1",
+      "classification": "VERIFIED",
+      "title": "filesystem 敏感文件 denylist 过窄",
+      "files": [
+        "connectors/filesystem/connector.py"
+      ],
+      "depends_on": [],
+      "required_fix": "不要继续扩 denylist 为主策略；改 workspace allowlist + secret boundary；辅以 basename/path patterns 和 file classification。",
+      "acceptance": "秘密夹具覆盖常见凭据文件；workspace 外一律拒绝。",
+      "workflow": [
+        "prove_current_behavior",
+        "add_failing_regression_test",
+        "implement_minimal_fix",
+        "run_targeted_tests",
+        "run_full_tests_and_ruff",
+        "document_compat_and_rollback"
+      ]
+    },
+    {
+      "id": "P1-006",
+      "severity": "P1",
+      "classification": "PROJECTED",
+      "title": "filesystem path 检查存在 TOCTOU/symlink race",
+      "files": [
+        "connectors/filesystem/connector.py"
+      ],
+      "depends_on": [],
+      "required_fix": "POSIX 使用 openat/dir_fd + O_NOFOLLOW，或把 connector 放入真正容器 sandbox；Windows 用安全句柄策略。",
+      "acceptance": "并发 symlink swap 测试；不能写出 root。",
+      "workflow": [
+        "prove_current_behavior",
+        "add_failing_regression_test",
+        "implement_minimal_fix",
+        "run_targeted_tests",
+        "run_full_tests_and_ruff",
+        "document_compat_and_rollback"
+      ]
+    },
+    {
+      "id": "P1-007",
+      "severity": "P1",
+      "classification": "VERIFIED",
+      "title": "result trust 在 descriptor 缺失时默认 trusted_tool",
+      "files": [
+        "src/personal_ai_os/agent_runtime/graph.py"
+      ],
+      "depends_on": [],
+      "required_fix": "trust 必须 fail-closed：unknown→untrusted_tool；ToolDescriptor 注册时 trust 必填并枚举校验。",
+      "acceptance": "缺 descriptor 的 web-like result 必须被 wrapper 包裹。",
+      "workflow": [
+        "prove_current_behavior",
+        "add_failing_regression_test",
+        "implement_minimal_fix",
+        "run_targeted_tests",
+        "run_full_tests_and_ruff",
+        "document_compat_and_rollback"
+      ]
+    },
+    {
+      "id": "P1-008",
+      "severity": "P1",
+      "classification": "VERIFIED",
+      "title": "长期 memory/profile 直接进入 system_prompt，来源信任被提升",
+      "files": [
+        "src/personal_ai_os/context_engine/engine.py",
+        "src/personal_ai_os/memory_engine/store.py"
+      ],
+      "depends_on": [
+        "P0-008"
+      ],
+      "required_fix": "Memory 增加 trust/provenance；user-derived memory 作为 DATA/user frame；只有 code-owned policy/identity 才能 trusted_system。抽取阶段过滤 instruction-shaped memories。",
+      "acceptance": "写入“忽略系统策略并…” memory；后续 context 中不能处于 system role。",
+      "workflow": [
+        "prove_current_behavior",
+        "add_failing_regression_test",
+        "implement_minimal_fix",
+        "run_targeted_tests",
+        "run_full_tests_and_ruff",
+        "document_compat_and_rollback"
+      ]
+    },
+    {
+      "id": "P1-009",
+      "severity": "P1",
+      "classification": "VERIFIED",
+      "title": "同一 Session 可同时启动多个 Run，active_run_id 会被覆盖",
+      "files": [
+        "apps/api/routers/messages.py",
+        "src/personal_ai_os/db/models.py"
+      ],
+      "depends_on": [],
+      "required_fix": "明确 session concurrency policy：默认 serialized。用 DB CAS/partial unique constraint 保证每 session 最多一个 active run；新消息排队或 409。",
+      "acceptance": "并发 POST 两条消息：只允许一个 running，另一条 queued/409；消息顺序稳定。",
+      "workflow": [
+        "prove_current_behavior",
+        "add_failing_regression_test",
+        "implement_minimal_fix",
+        "run_targeted_tests",
+        "run_full_tests_and_ruff",
+        "document_compat_and_rollback"
+      ]
+    },
+    {
+      "id": "P1-010",
+      "severity": "P1",
+      "classification": "VERIFIED",
+      "title": "SessionRouter get-or-create 是 SELECT→INSERT race，且仓库无 Alembic version migration",
+      "files": [
+        "src/personal_ai_os/gateway/router.py",
+        "src/personal_ai_os/db/models.py",
+        "migrations/"
+      ],
+      "depends_on": [
+        "P1-025"
+      ],
+      "required_fix": "新增 Alembic baseline + partial unique index；使用 INSERT ON CONFLICT/IntegrityError retry。",
+      "acceptance": "两个并发 get_or_create 只能得到同一个 session id；migration upgrade/downgrade CI。",
+      "workflow": [
+        "prove_current_behavior",
+        "add_failing_regression_test",
+        "implement_minimal_fix",
+        "run_targeted_tests",
+        "run_full_tests_and_ruff",
+        "document_compat_and_rollback"
+      ]
+    },
+    {
+      "id": "P1-011",
+      "severity": "P1",
+      "classification": "VERIFIED",
+      "title": "消息/工具去重依赖进程内 dict，重启后可能重复持久化",
+      "files": [
+        "src/personal_ai_os/agent_runtime/runner.py",
+        "src/personal_ai_os/db/models.py"
+      ],
+      "depends_on": [
+        "P0-005"
+      ],
+      "required_fix": "每条 graph event 使用稳定 event_id/sequence；DB unique(run_id,event_id)；ToolCall unique(run_id,idempotency_key) where not null；持久化采用 upsert。",
+      "acceptance": "restart/resume 重放同一 checkpoint 100 次，DB 仍只有一份。",
+      "workflow": [
+        "prove_current_behavior",
+        "add_failing_regression_test",
+        "implement_minimal_fix",
+        "run_targeted_tests",
+        "run_full_tests_and_ruff",
+        "document_compat_and_rollback"
+      ]
+    },
+    {
+      "id": "P1-012",
+      "severity": "P1",
+      "classification": "VERIFIED",
+      "title": "HTTP SSRF 保护存在 DNS rebinding/解析与连接分离",
+      "files": [
+        "connectors/http_fetch/connector.py"
+      ],
+      "depends_on": [],
+      "required_fix": "使用受控 resolver 并 pin 已验证 IP 到连接；连接后校验 peer IP；阻断 IPv4/IPv6 private/metadata ranges；prod allowlist 默认非空。",
+      "acceptance": "模拟 DNS 第一次 public 第二次 private；请求必须阻断。",
+      "workflow": [
+        "prove_current_behavior",
+        "add_failing_regression_test",
+        "implement_minimal_fix",
+        "run_targeted_tests",
+        "run_full_tests_and_ruff",
+        "document_compat_and_rollback"
+      ]
+    },
+    {
+      "id": "P1-013",
+      "severity": "P1",
+      "classification": "VERIFIED",
+      "title": "Tool capability 元数据没有注册期不变量校验",
+      "files": [
+        "src/personal_ai_os/tool_broker/registry.py",
+        "src/personal_ai_os/policy_engine/engine.py"
+      ],
+      "depends_on": [
+        "P0-002"
+      ],
+      "required_fix": "ToolRegistry.register 做 CapabilityValidator：destructive=>R4；external side effect=>>=R3；non-idempotent write 不可 R0/R1；凭据操作最低策略。",
+      "acceptance": "property-based test 枚举非法 descriptor 组合必须拒绝注册。",
+      "workflow": [
+        "prove_current_behavior",
+        "add_failing_regression_test",
+        "implement_minimal_fix",
+        "run_targeted_tests",
+        "run_full_tests_and_ruff",
+        "document_compat_and_rollback"
+      ]
+    },
+    {
+      "id": "P1-014",
+      "severity": "P1",
+      "classification": "VERIFIED",
+      "title": "list_available_tools / API tool listing 不按 owner capability 过滤",
+      "files": [
+        "src/personal_ai_os/tool_broker/broker.py",
+        "apps/api/routers/tools.py"
+      ],
+      "depends_on": [
+        "P0-007"
+      ],
+      "required_fix": "统一 CapabilityService.visible_tools(owner_id,session/project)；ContextEngine 与 API 都必须调用同一过滤器。",
+      "acceptance": "A/B 用户工具列表不同且模型 tools schema 同步不同。",
+      "workflow": [
+        "prove_current_behavior",
+        "add_failing_regression_test",
+        "implement_minimal_fix",
+        "run_targeted_tests",
+        "run_full_tests_and_ruff",
+        "document_compat_and_rollback"
+      ]
+    },
+    {
+      "id": "P1-015",
+      "severity": "P1",
+      "classification": "PROJECTED",
+      "title": "ToolBroker.test_tool 是真实执行但绕过 policy/audit 的危险 public method",
+      "files": [
+        "src/personal_ai_os/tool_broker/broker.py"
+      ],
+      "depends_on": [],
+      "required_fix": "删除或改为 validate_tool（只 schema/policy simulation，不 execute）；需要真实测试时只允许 dev-only isolated connector。",
+      "acceptance": "静态测试禁止生产代码调用 bypass_policy execution API。",
+      "workflow": [
+        "prove_current_behavior",
+        "add_failing_regression_test",
+        "implement_minimal_fix",
+        "run_targeted_tests",
+        "run_full_tests_and_ruff",
+        "document_compat_and_rollback"
+      ]
+    },
+    {
+      "id": "P1-016",
+      "severity": "P1",
+      "classification": "VERIFIED",
+      "title": "模型流失败后无条件 complete 重试，可能产生重复费用/不同决策",
+      "files": [
+        "src/personal_ai_os/agent_runtime/graph.py"
+      ],
+      "depends_on": [],
+      "required_fix": "只有“首字节前失败”可透明 fallback；首 delta 后失败则返回 interrupted/model_stream_error，可由上层带 idempotency token 重试。记录 provider request_id。",
+      "acceptance": "流输出 1 token 后断开：不得自动发第二个模型请求。",
+      "workflow": [
+        "prove_current_behavior",
+        "add_failing_regression_test",
+        "implement_minimal_fix",
+        "run_targeted_tests",
+        "run_full_tests_and_ruff",
+        "document_compat_and_rollback"
+      ]
+    },
+    {
+      "id": "P1-017",
+      "severity": "P1",
+      "classification": "VERIFIED",
+      "title": "OpenAI tool 名 sanitize 存在碰撞",
+      "files": [
+        "src/personal_ai_os/model_gateway/provider.py"
+      ],
+      "depends_on": [],
+      "required_fix": "使用稳定可逆编码或注册时生成 provider_alias（带 hash）；启动时检测 alias collision。",
+      "acceptance": "a.b/a_b/a-b 三工具同时注册仍能准确 round-trip。",
+      "workflow": [
+        "prove_current_behavior",
+        "add_failing_regression_test",
+        "implement_minimal_fix",
+        "run_targeted_tests",
+        "run_full_tests_and_ruff",
+        "document_compat_and_rollback"
+      ]
+    },
+    {
+      "id": "P1-018",
+      "severity": "P1",
+      "classification": "VERIFIED",
+      "title": "自定义 provider base_url 会携带 API key 发往任意 URL",
+      "files": [
+        "src/personal_ai_os/model_gateway/config.py",
+        "src/personal_ai_os/model_gateway/provider.py"
+      ],
+      "depends_on": [],
+      "required_fix": "非 localhost 默认强制 HTTPS；首次未知域名显示 host+TLS 指纹确认；配置 key 与 endpoint host 绑定；支持 no-auth local profile。",
+      "acceptance": "http://evil.example + key 配置必须拒绝；localhost Ollama 可按 no-auth 模式。",
+      "workflow": [
+        "prove_current_behavior",
+        "add_failing_regression_test",
+        "implement_minimal_fix",
+        "run_targeted_tests",
+        "run_full_tests_and_ruff",
+        "document_compat_and_rollback"
+      ]
+    },
+    {
+      "id": "P1-019",
+      "severity": "P1",
+      "classification": "VERIFIED",
+      "title": "SSE live queue 满时静默丢事件，客户端无法知道有 gap",
+      "files": [
+        "src/personal_ai_os/agent_runtime/streams.py",
+        "apps/api/routers/stream.py"
+      ],
+      "depends_on": [
+        "P1-011"
+      ],
+      "required_fix": "事件先写 durable EventLog（或至少关键事件 durable）；每 run 单调 event_seq；SSE 支持 Last-Event-ID/replay；token delta 可合并但必须发 gap/coalesced 标记。",
+      "acceptance": "人工制造 QueueFull；客户端最终必须能从 replay 得到完整 terminal/tool state。",
+      "workflow": [
+        "prove_current_behavior",
+        "add_failing_regression_test",
+        "implement_minimal_fix",
+        "run_targeted_tests",
+        "run_full_tests_and_ruff",
+        "document_compat_and_rollback"
+      ]
+    },
+    {
+      "id": "P1-020",
+      "severity": "P1",
+      "classification": "PROJECTED",
+      "title": "in-process streams/EventBus 在 multi-worker/多副本部署失效",
+      "files": [
+        "src/personal_ai_os/agent_runtime/streams.py",
+        "src/personal_ai_os/scheduler/event_bus.py"
+      ],
+      "depends_on": [
+        "P0-005",
+        "P1-019"
+      ],
+      "required_fix": "在进入 multi-worker 前引入 Redis Streams/Postgres event log/NATS；sticky session 只能临时缓解。",
+      "acceptance": "2 worker integration：任意 worker 订阅都能看到同一 run。",
+      "workflow": [
+        "prove_current_behavior",
+        "add_failing_regression_test",
+        "implement_minimal_fix",
+        "run_targeted_tests",
+        "run_full_tests_and_ruff",
+        "document_compat_and_rollback"
+      ]
+    },
+    {
+      "id": "P1-021",
+      "severity": "P1",
+      "classification": "VERIFIED",
+      "title": "API key 以明文存数据库",
+      "files": [
+        "apps/api/deps.py",
+        "src/personal_ai_os/db/models.py"
+      ],
+      "depends_on": [],
+      "required_fix": "存 key_prefix + HMAC/Argon2 hash；创建时只返回明文一次；支持 rotate/revoke/last_used_at。",
+      "acceptance": "DB dump 不含可用 key；旧 key 迁移后失效/按计划轮换。",
+      "workflow": [
+        "prove_current_behavior",
+        "add_failing_regression_test",
+        "implement_minimal_fix",
+        "run_targeted_tests",
+        "run_full_tests_and_ruff",
+        "document_compat_and_rollback"
+      ]
+    },
+    {
+      "id": "P1-022",
+      "severity": "P1",
+      "classification": "VERIFIED",
+      "title": "CORS 配置为 * + credentials",
+      "files": [
+        "apps/api/main.py"
+      ],
+      "depends_on": [],
+      "required_fix": "默认不启 CORS；显式 PERSONAL_AI_CORS_ORIGINS allowlist；credentials 按需。",
+      "acceptance": "evil origin preflight 不返回允许头；合法 origin 正常。",
+      "workflow": [
+        "prove_current_behavior",
+        "add_failing_regression_test",
+        "implement_minimal_fix",
+        "run_targeted_tests",
+        "run_full_tests_and_ruff",
+        "document_compat_and_rollback"
+      ]
+    },
+    {
+      "id": "P1-023",
+      "severity": "P1",
+      "classification": "VERIFIED",
+      "title": "healthz 永远 ok，服务依赖可因 _lazy 被吞异常而缺失",
+      "files": [
+        "apps/api/main.py",
+        "src/personal_ai_os/gateway/services.py"
+      ],
+      "depends_on": [],
+      "required_fix": "分 /livez 与 /readyz；ready 检 DB migration、provider config、runner、checkpointer、required connectors。prod strict wiring，dev 才允许 graceful degradation。",
+      "acceptance": "故意破坏 connector/provider 初始化：live=200，ready=503，prod 可配置 fail startup。",
+      "workflow": [
+        "prove_current_behavior",
+        "add_failing_regression_test",
+        "implement_minimal_fix",
+        "run_targeted_tests",
+        "run_full_tests_and_ruff",
+        "document_compat_and_rollback"
+      ]
+    },
+    {
+      "id": "P1-024",
+      "severity": "P1",
+      "classification": "VERIFIED",
+      "title": "数据库配置文档声称生产必须显式 DATABASE_URL，代码却静默 SQLite fallback",
+      "files": [
+        "src/personal_ai_os/db/session.py",
+        "apps/api/main.py"
+      ],
+      "depends_on": [],
+      "required_fix": "APP_ENV=prod 时 DATABASE_URL 缺失立即启动失败；dev 才允许 SQLite。生产只跑 alembic upgrade，不 create_all。",
+      "acceptance": "prod env 无 DATABASE_URL 必须 non-zero exit。",
+      "workflow": [
+        "prove_current_behavior",
+        "add_failing_regression_test",
+        "implement_minimal_fix",
+        "run_targeted_tests",
+        "run_full_tests_and_ruff",
+        "document_compat_and_rollback"
+      ]
+    },
+    {
+      "id": "P1-025",
+      "severity": "P1",
+      "classification": "VERIFIED",
+      "title": "仓库没有真正 Alembic versions，schema 只能 create_all 演化",
+      "files": [
+        "migrations/",
+        "src/personal_ai_os/db/session.py"
+      ],
+      "depends_on": [],
+      "required_fix": "建立 baseline revision + 每变更 migration；CI 从空库 upgrade head、从上个 release upgrade、downgrade smoke。",
+      "acceptance": "alembic current=head；schema drift check 为 0。",
+      "workflow": [
+        "prove_current_behavior",
+        "add_failing_regression_test",
+        "implement_minimal_fix",
+        "run_targeted_tests",
+        "run_full_tests_and_ruff",
+        "document_compat_and_rollback"
+      ]
+    },
+    {
+      "id": "P1-026",
+      "severity": "P1",
+      "classification": "VERIFIED",
+      "title": "请求 schema 大量字符串/字典无尺寸限制",
+      "files": [
+        "apps/api/schemas.py"
+      ],
+      "depends_on": [],
+      "required_fix": "API middleware 限 body bytes；Pydantic 字段 max_length；dict depth/items；附件独立上传协议。",
+      "acceptance": "超过阈值返回 413/422，不创建 Run。",
+      "workflow": [
+        "prove_current_behavior",
+        "add_failing_regression_test",
+        "implement_minimal_fix",
+        "run_targeted_tests",
+        "run_full_tests_and_ruff",
+        "document_compat_and_rollback"
+      ]
+    },
+    {
+      "id": "P1-027",
+      "severity": "P1",
+      "classification": "VERIFIED",
+      "title": "Run resume CAS 后若 runner 崩溃会永久 stuck running",
+      "files": [
+        "apps/api/routers/runs.py",
+        "src/personal_ai_os/agent_runtime/runner.py"
+      ],
+      "depends_on": [
+        "P0-005",
+        "P1-011"
+      ],
+      "required_fix": "引入 execution lease: status + lease_owner + lease_expires_at + attempt；worker claim 后执行，可过期回收；或 transactional outbox/job queue。",
+      "acceptance": "在 CAS 后 kill -9；新实例可 reclaim 并 exactly-once/at-least-once-safe 续跑。",
+      "workflow": [
+        "prove_current_behavior",
+        "add_failing_regression_test",
+        "implement_minimal_fix",
+        "run_targeted_tests",
+        "run_full_tests_and_ruff",
+        "document_compat_and_rollback"
+      ]
+    },
+    {
+      "id": "P1-028",
+      "severity": "P1",
+      "classification": "VERIFIED",
+      "title": "resume 成功路径没有 session memory compaction",
+      "files": [
+        "src/personal_ai_os/agent_runtime/runner.py"
+      ],
+      "depends_on": [],
+      "required_fix": "所有 terminal completed 统一进入 finalize pipeline，其中包含 compaction，不分 start/resume。",
+      "acceptance": "同一对话有/无 approval，最终 summary 更新规则一致。",
+      "workflow": [
+        "prove_current_behavior",
+        "add_failing_regression_test",
+        "implement_minimal_fix",
+        "run_targeted_tests",
+        "run_full_tests_and_ruff",
+        "document_compat_and_rollback"
+      ]
+    },
+    {
+      "id": "P1-029",
+      "severity": "P1",
+      "classification": "VERIFIED",
+      "title": "plan 节点基本是展示性结构，不约束后续 tool 决策",
+      "files": [
+        "src/personal_ai_os/agent_runtime/graph.py"
+      ],
+      "depends_on": [],
+      "required_fix": "PlanStep 加 expected_capability/preconditions/postconditions/status；decide 必须绑定 current_step 或显式 replan；偏离产 plan.changed event。",
+      "acceptance": "脚本模型故意调用与 current step 不符工具，runtime 必须 replan/拒绝而不是静默执行。",
+      "workflow": [
+        "prove_current_behavior",
+        "add_failing_regression_test",
+        "implement_minimal_fix",
+        "run_targeted_tests",
+        "run_full_tests_and_ruff",
+        "document_compat_and_rollback"
+      ]
+    },
+    {
+      "id": "P1-030",
+      "severity": "P1",
+      "classification": "VERIFIED",
+      "title": "tool.started 在审批之前发出，生命周期语义错误",
+      "files": [
+        "src/personal_ai_os/agent_runtime/graph.py"
+      ],
+      "depends_on": [],
+      "required_fix": "拆 event：tool.requested→approval.required→tool.started(真实 connector 前)→tool.completed/failed。唯一 tool_call_id 贯穿。",
+      "acceptance": "approval 工具事件序列严格断言，不得 started→approval.required。",
+      "workflow": [
+        "prove_current_behavior",
+        "add_failing_regression_test",
+        "implement_minimal_fix",
+        "run_targeted_tests",
+        "run_full_tests_and_ruff",
+        "document_compat_and_rollback"
+      ]
+    },
+    {
+      "id": "P1-031",
+      "severity": "P1",
+      "classification": "VERIFIED",
+      "title": "非法 tool arguments JSON 被静默转成 {}",
+      "files": [
+        "src/personal_ai_os/agent_runtime/graph.py"
+      ],
+      "depends_on": [],
+      "required_fix": "返回 ParseError tool result，包含安全截断的原始片段；绝不能替换成 {} 执行。",
+      "acceptance": "arguments=\"{bad\" 不调用 connector，模型收到 TOOL_ARGUMENT_PARSE_ERROR。",
+      "workflow": [
+        "prove_current_behavior",
+        "add_failing_regression_test",
+        "implement_minimal_fix",
+        "run_targeted_tests",
+        "run_full_tests_and_ruff",
+        "document_compat_and_rollback"
+      ]
+    },
+    {
+      "id": "P1-032",
+      "severity": "P1",
+      "classification": "VERIFIED",
+      "title": "缺 run_id/owner_id 时运行时随机生成 UUID，而非 fail-fast",
+      "files": [
+        "src/personal_ai_os/agent_runtime/graph.py"
+      ],
+      "depends_on": [],
+      "required_fix": "AgentState 强 schema；进入 graph 前 validate required identity；缺任何身份立即 fail。",
+      "acceptance": "删除 owner_id 的 state 必须在 tool broker 前失败。",
+      "workflow": [
+        "prove_current_behavior",
+        "add_failing_regression_test",
+        "implement_minimal_fix",
+        "run_targeted_tests",
+        "run_full_tests_and_ruff",
+        "document_compat_and_rollback"
+      ]
+    },
+    {
+      "id": "P1-033",
+      "severity": "P1",
+      "classification": "VERIFIED",
+      "title": "安全审计完全 fail-soft，可无声丢失",
+      "files": [
+        "src/personal_ai_os/tool_broker/broker.py",
+        "src/personal_ai_os/scheduler/event_bus.py"
+      ],
+      "depends_on": [
+        "P0-003",
+        "P0-004"
+      ],
+      "required_fix": "分级：业务 telemetry fail-soft；security audit 对 R3/R4 采用 transactional outbox，至少先 durable intent 再执行。",
+      "acceptance": "让 Audit DB 故障：R3/R4 不得不可追踪地执行成功。",
+      "workflow": [
+        "prove_current_behavior",
+        "add_failing_regression_test",
+        "implement_minimal_fix",
+        "run_targeted_tests",
+        "run_full_tests_and_ruff",
+        "document_compat_and_rollback"
+      ]
+    },
+    {
+      "id": "P1-034",
+      "severity": "P1",
+      "classification": "VERIFIED",
+      "title": "automation.run 在确定 501 前先更新 last_run_at",
+      "files": [
+        "apps/api/routers/automations.py"
+      ],
+      "depends_on": [],
+      "required_fix": "last_attempt_at 与 last_success_at 分离；未 wired 不应写 last_success/last_run。",
+      "acceptance": "scheduler None 后 last_success_at 保持 null，last_attempt 可记录 failure reason。",
+      "workflow": [
+        "prove_current_behavior",
+        "add_failing_regression_test",
+        "implement_minimal_fix",
+        "run_targeted_tests",
+        "run_full_tests_and_ruff",
+        "document_compat_and_rollback"
+      ]
+    },
+    {
+      "id": "P2-001",
+      "severity": "P2",
+      "classification": "PROJECTED",
+      "title": "本地 provider API key 以明文 JSON 存储",
+      "files": [
+        "src/personal_ai_os/model_gateway/config.py"
+      ],
+      "depends_on": [],
+      "required_fix": "优先 OS keyring/Secret Service/DPAPI；JSON 仅保存 secret_ref；兼容迁移旧 profile。",
+      "acceptance": "迁移后 profiles.json 不含 sk-/token 原文。",
+      "workflow": [
+        "prove_current_behavior",
+        "add_failing_regression_test",
+        "implement_minimal_fix",
+        "run_targeted_tests",
+        "run_full_tests_and_ruff",
+        "document_compat_and_rollback"
+      ]
+    },
+    {
+      "id": "P2-002",
+      "severity": "P2",
+      "classification": "VERIFIED",
+      "title": "LogSanitizer 对 list 内字符串不递归 sanitize",
+      "files": [
+        "src/personal_ai_os/common/utils.py"
+      ],
+      "depends_on": [],
+      "required_fix": "实现 generic sanitize_value 对 dict/list/tuple/string 全递归；加入深度/节点上限防 DoS。",
+      "acceptance": "{\"x\":[\"Bearer SECRET...\"]} 必须被脱敏。",
+      "workflow": [
+        "prove_current_behavior",
+        "add_failing_regression_test",
+        "implement_minimal_fix",
+        "run_targeted_tests",
+        "run_full_tests_and_ruff",
+        "document_compat_and_rollback"
+      ]
+    },
+    {
+      "id": "P2-003",
+      "severity": "P2",
+      "classification": "PROJECTED",
+      "title": "SQLite fallback 不适合并发 Runner/多任务写入",
+      "files": [
+        "src/personal_ai_os/db/session.py"
+      ],
+      "depends_on": [],
+      "required_fix": "SQLite 明确仅 dev/single-process；prod Postgres。dev 开 WAL+busy_timeout 并降低写频。",
+      "acceptance": "10 concurrent runs dev 不死锁；prod perf 使用 Postgres。",
+      "workflow": [
+        "prove_current_behavior",
+        "add_failing_regression_test",
+        "implement_minimal_fix",
+        "run_targeted_tests",
+        "run_full_tests_and_ruff",
+        "document_compat_and_rollback"
+      ]
+    },
+    {
+      "id": "P2-004",
+      "severity": "P2",
+      "classification": "PROJECTED",
+      "title": "模型价格表硬编码且未知 provider 费用归零",
+      "files": [
+        "src/personal_ai_os/model_gateway/provider.py"
+      ],
+      "depends_on": [],
+      "required_fix": "provider profile 携 pricing/version；记录 raw usage；budget service 独立计算并支持未知价格=unknown 而非 0。",
+      "acceptance": "未知模型 UI 显示 unknown，不显示 $0.00。",
+      "workflow": [
+        "prove_current_behavior",
+        "add_failing_regression_test",
+        "implement_minimal_fix",
+        "run_targeted_tests",
+        "run_full_tests_and_ruff",
+        "document_compat_and_rollback"
+      ]
+    },
+    {
+      "id": "P2-005",
+      "severity": "P2",
+      "classification": "PROJECTED",
+      "title": "事件 schema_version 固定 1 但缺服务端兼容策略/持久 event id",
+      "files": [
+        "apps/api/routers/stream.py",
+        "src/personal_ai_os/cli/domain/normalizer.py"
+      ],
+      "depends_on": [],
+      "required_fix": "event_id/seq 在事件产生时持久化；envelope version negotiation；unknown event 保留 raw payload。",
+      "acceptance": "同一 run replay 两次 event_id/seq 稳定一致。",
+      "workflow": [
+        "prove_current_behavior",
+        "add_failing_regression_test",
+        "implement_minimal_fix",
+        "run_targeted_tests",
+        "run_full_tests_and_ruff",
+        "document_compat_and_rollback"
+      ]
+    }
+  ]
+}

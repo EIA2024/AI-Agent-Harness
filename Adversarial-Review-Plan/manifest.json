@@ -1,0 +1,29 @@
+{
+  "repo": "https://github.com/EIA2024/AI-Agent-Harness",
+  "branch": "cli-v2-upgrade",
+  "reviewed_sha": "4db7ba12fd1e4c09e4b9539dc0850345c72e96ad",
+  "generated": "2026-08-12",
+  "issue_count": 47,
+  "files": [
+    "00_DEEPSEEK_EXECUTION_PROTOCOL.md",
+    "01_MASTER_ROADMAP.md",
+    "02_RUNTIME_TOOL_LOOP.md",
+    "03_APPROVAL_POLICY_SECURITY.md",
+    "04_CONNECTOR_SANDBOX.md",
+    "05_AUTH_DEPLOY_MULTITENANCY.md",
+    "06_DURABILITY_CONCURRENCY.md",
+    "07_CONTEXT_MEMORY_TRUST.md",
+    "08_DB_SCHEMA_MIGRATION.md",
+    "09_MODEL_GATEWAY.md",
+    "10_CLI_EVENT_UX.md",
+    "11_OPERATIONS.md",
+    "12_TEST_VERIFICATION.md",
+    "13_FUTURE_ARCHITECTURE.md",
+    "14_ISSUE_REGISTER.md",
+    "15_DEEPSEEK_MASTER_PROMPT.md",
+    "ISSUE_REGISTER.csv",
+    "README.md",
+    "SOURCE_MAP.md",
+    "deepseek_tasks.json"
+  ]
+}

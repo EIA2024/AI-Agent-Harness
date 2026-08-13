@@ -170,7 +170,7 @@ class ToolDescriptor:
         self.retry_policy = retry_policy
         self.tags = tags or []
         self.version = version
-        # trust level for results from this tool; None → trusted_tool (default)
+        # None fails closed to untrusted_tool at the runtime serialization seam.
         self.result_trust = result_trust
 
     def to_llm_schema(self) -> dict:
@@ -451,7 +451,7 @@ class ModelUsage:
                  "total_tokens", "cost_usd")
 
     def __init__(self, *, input_tokens: int = 0, cached_tokens: int = 0,
-                 output_tokens: int = 0, cost_usd: float = 0.0):
+                 output_tokens: int = 0, cost_usd: float | None = None):
         self.input_tokens = input_tokens
         self.cached_tokens = cached_tokens
         self.output_tokens = output_tokens

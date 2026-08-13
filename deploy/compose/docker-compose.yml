@@ -1,5 +1,11 @@
 # Personal AI OS — local / personal-server deployment (blueprint §58-§60).
 # Mode B (personal server): api + postgres. Web frontend can be added later.
+#
+# P0-006: NO secret defaults. Export secrets in the shell / .env — every
+# credential uses ${VAR:?required} so a missing secret fails startup instead of
+# silently using a weak default. Postgres is NOT published to the host (internal
+# docker network only); the API binds 127.0.0.1 on the host (put it behind a
+# reverse proxy if it must be reachable remotely).
 
 services:
   api:
@@ -7,13 +13,21 @@ services:
       context: ../..
       dockerfile: deploy/docker/Dockerfile.api
     ports:
-      - "${API_PORT:-8000}:8000"
+      # loopback only — never 0.0.0.0 unless behind an authenticated proxy
+      - "127.0.0.1:${API_PORT:-8000}:8000"
     environment:
-      - DATABASE_URL=postgresql+asyncpg://user:pass@postgres:5432/personal_ai_os
+      - APP_ENV=production
+      - DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER:?POSTGRES_USER is required}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/${POSTGRES_DB:-personal_ai_os}
+      - PERSONAL_AI_KEY_HASH_SECRET=${PERSONAL_AI_KEY_HASH_SECRET:?PERSONAL_AI_KEY_HASH_SECRET is required}
+      - PERSONAL_AI_WORKSPACE_ROOT=/workspace
+      - PERSONAL_AI_HTTP_ALLOWED_DOMAINS=${PERSONAL_AI_HTTP_ALLOWED_DOMAINS:?PERSONAL_AI_HTTP_ALLOWED_DOMAINS is required}
+      - PERSONAL_AI_DATA_DIR=/app/data
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
-      - PERSONAL_AI_DEV_API_KEY=${PERSONAL_AI_DEV_API_KEY:-dev-key}
+      # Dev key is OPT-IN and never has a default; omit entirely in production.
+      - PERSONAL_AI_DEV_API_KEY=${PERSONAL_AI_DEV_API_KEY:-}
     volumes:
       - ./data:/app/data
+      - ./workspace:/workspace
     depends_on:
       postgres:
         condition: service_healthy
@@ -22,15 +36,15 @@ services:
   postgres:
     image: pgvector/pgvector:pg16
     environment:
-      POSTGRES_DB: personal_ai_os
-      POSTGRES_USER: user
-      POSTGRES_PASSWORD: pass
-    ports:
-      - "5432:5432"
+      POSTGRES_DB: ${POSTGRES_DB:-personal_ai_os}
+      POSTGRES_USER: ${POSTGRES_USER:?POSTGRES_USER is required}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+    expose:
+      - "5432"   # internal network only — no host port (P0-006)
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U user -d personal_ai_os"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB:-personal_ai_os}"]
       interval: 5s
       timeout: 5s
       retries: 10

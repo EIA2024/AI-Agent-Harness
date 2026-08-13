@@ -441,9 +441,10 @@ async def test_tool_call_recorded_to_db():
             assert row.status == "success"
             assert row.risk_level == 1
             assert row.idempotency_key == "ik-rec-1"
-            # recorded arguments are sanitized — the secret is gone
+            # Credentials travel through the in-memory execution context and
+            # never enter the persisted argument map.
             assert row.arguments["message"] == "hi"
-            assert row.arguments["api_key"] == "[REDACTED]"
+            assert "api_key" not in row.arguments
             assert SECRET not in repr(row.arguments)
     finally:
         await dispose_engine()
@@ -495,22 +496,25 @@ async def test_list_available_tools():
 
 
 @pytest.mark.asyncio
-async def test_test_tool_dry_run_skips_policy():
+async def test_validate_tool_does_not_execute_or_consult_policy():
+    """P1-015 — validate_tool is a dry-run: never executes, never touches policy."""
     policy = FakePolicy("deny")  # deny would block a real call
-    broker, registry, connector = make_broker(policy=policy)
+    broker, _registry, connector = make_broker(policy=policy)
     await register_echo(broker, connector)
-    result = await broker.test_tool("fake.echo", {"message": "hi"}, owner_id=uuid4())
-    assert result.success  # test_tool bypasses policy
+    result = await broker.validate_tool("fake.echo", {"message": "hi"}, owner_id=uuid4())
+    assert result.success is True
+    assert connector.executed == []  # the connector never ran
     assert policy.calls == []  # policy never consulted
 
 
 @pytest.mark.asyncio
-async def test_test_tool_still_validates_schema():
-    broker, _registry, _connector = make_broker()
-    await register_echo(broker, _connector)
-    result = await broker.test_tool("fake.echo", {"count": "bad"}, owner_id=uuid4())
+async def test_validate_tool_still_validates_schema():
+    broker, _registry, connector = make_broker()
+    await register_echo(broker, connector)
+    result = await broker.validate_tool("fake.echo", {"count": "bad"}, owner_id=uuid4())
     assert result.success is False
     assert result.error_code == "SCHEMA_VALIDATION_ERROR"
+    assert connector.executed == []
 
 
 @pytest.mark.asyncio
@@ -542,3 +546,125 @@ async def test_register_connector_indexes_under_namespace():
     # the registered tool resolves to the connector via namespace, prefix, and connector_name
     assert broker.resolve_connector(echo_tool()) is connector
     assert registry.get("fake.echo") is not None
+
+
+async def test_capability_service_filters_owner_visibility():
+    """P1-014 — an owner with a deny-set tool must not see it."""
+    from personal_ai_os.gateway.capabilities import CapabilityService
+    from personal_ai_os.tool_broker import ToolBroker
+    from tests.unit.test_registry import make_tool
+
+    registry = ToolRegistry()
+    registry.register(make_tool("safe.list", "safe", risk_level=1))
+    registry.register(make_tool("secret.get", "secret", risk_level=1))
+    caps = CapabilityService(registry, owner_deny={"owner-b": {"secret.get"}})
+    broker = ToolBroker(
+        registry=registry, policy_engine=FakePolicy(), credential_broker=FakeCredential(),
+        capabilities=caps,
+    )
+    a = await broker.list_available_tools(owner_id="owner-a")
+    assert any(t.name == "secret.get" for t in a)
+    b = await broker.list_available_tools(owner_id="owner-b")
+    assert not any(t.name == "secret.get" for t in b)
+    assert any(t.name == "safe.list" for t in b)
+    assert caps.can_use("owner-a", "secret.get")
+    assert not caps.can_use("owner-b", "secret.get")
+
+
+async def test_capability_risk_ceiling_is_enforced_at_execution():
+    from personal_ai_os.gateway.capabilities import CapabilityService
+    from personal_ai_os.tool_broker import ToolBroker
+    from tests.unit.test_registry import make_tool
+
+    registry = ToolRegistry()
+    registry.register(make_tool("danger.run", "danger", risk_level=3))
+    caps = CapabilityService(registry, risk_ceiling=1)
+    broker = ToolBroker(
+        registry=registry,
+        policy_engine=FakePolicy(),
+        credential_broker=FakeCredential(),
+        capabilities=caps,
+    )
+
+    assert not caps.can_use("owner-a", "danger.run")
+    result = await broker.execute("danger.run", {}, ctx(owner_id="owner-a"))
+    assert result.success is False
+    assert result.error_code == "CAPABILITY_DENIED"
+
+
+
+
+async def test_result_data_size_is_bounded():
+    """P1-001 — a connector cannot stuff an unbounded data dict into state."""
+    big_data = {"entries": [{"x": "y" * 500} for _ in range(1000)]}
+    connector = FakeConnector(result=ToolResult.ok(data=big_data))
+    broker, registry, _ = make_broker(connector=connector, max_result_chars=2000)
+    await register_echo(broker, connector)
+    result = await broker.execute("fake.echo", {"message": "hi"}, ctx())
+    assert result.success
+    # the data was replaced by a bounded marker
+    assert result.data.get("truncated") is True
+    assert result.raw_size_bytes and result.raw_size_bytes > 0
+
+
+def _r3_tool() -> ToolDescriptor:
+    t = echo_tool()
+    t.name = "mail.send"
+    t.risk_level = 3
+    t.side_effect = True
+    return t
+
+
+class R3Connector(FakeConnector):
+    async def list_tools(self) -> list[ToolDescriptor]:
+        return [_r3_tool()]
+
+
+async def test_r3_execution_writes_durable_intent():
+    """P1-033 — an R3 tool persists a durable intent before executing."""
+    from sqlalchemy import select
+
+    from personal_ai_os.db.models import AuditEvent, Run, User
+    from personal_ai_os.db.session import session_scope
+
+    owner_id = uuid4()
+    async with session_scope() as s:
+        s.add(User(username=f"r3{uuid4().hex[:6]}", api_key=f"k{uuid4().hex[:8]}", id=owner_id))
+        await s.flush()
+        run_id = uuid4()
+        s.add(Run(id=run_id, owner_id=owner_id, status="running", input={}))
+        await s.flush()
+    connector = R3Connector()
+    broker, registry, _ = make_broker(connector=connector)
+    await broker.register_connector(connector)
+    result = await broker.execute(
+        "mail.send", {"message": "hi"}, ctx(owner_id=owner_id, run_id=run_id)
+    )
+    assert result.success
+    assert connector.executed  # the connector ran
+    async with session_scope() as s:
+        intents = (await s.execute(
+            select(AuditEvent).where(AuditEvent.event_type == "tool.intent")
+        )).scalars().all()
+        assert intents, "expected a durable tool.intent record"
+        assert intents[0].resource_id == "mail.send"
+
+
+async def test_r3_intent_failure_fails_closed(monkeypatch):
+    """P1-033 — if the durable intent cannot be persisted, the tool never runs."""
+    connector = R3Connector()
+    broker, registry, _ = make_broker(connector=connector)
+    await broker.register_connector(connector)
+
+    from contextlib import asynccontextmanager
+
+    @asynccontextmanager
+    async def _boom(*a, **k):
+        raise RuntimeError("db down")
+        yield
+
+    monkeypatch.setattr("personal_ai_os.db.session.session_scope", _boom)
+    result = await broker.execute("mail.send", {"message": "hi"}, ctx())
+    assert result.success is False
+    assert result.error_code == "POLICY_DENIED"
+    assert connector.executed == []  # never executed

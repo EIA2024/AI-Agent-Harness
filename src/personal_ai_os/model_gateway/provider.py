@@ -33,11 +33,13 @@ MODEL_PRICING: dict[str, dict[str, float]] = {
 }
 
 
-def estimate_cost_usd(model: str, input_tokens: int, cached_tokens: int, output_tokens: int) -> float:
+def estimate_cost_usd(
+    model: str, input_tokens: int, cached_tokens: int, output_tokens: int
+) -> float | None:
     """Estimate the USD cost of a call given the per-model pricing table."""
     price = MODEL_PRICING.get(model)
     if price is None:
-        return 0.0
+        return None
     return (
         input_tokens * price["input"] + cached_tokens * price["cached"] + output_tokens * price["output"]
     ) / 1_000_000
@@ -291,6 +293,18 @@ def _sanitize_tool_name(name: str) -> str:
     return "".join(c if c.isalnum() or c in "_-" else "_" for c in name)
 
 
+def _disambiguate(base: str, original: str, name_map: dict) -> str:
+    """Return a collision-free sanitized alias for ``original`` (P1-017)."""
+    import hashlib
+
+    candidate = f"{base[:32]}_{hashlib.sha256(original.encode()).hexdigest()[:6]}"
+    n = 1
+    while candidate in name_map and name_map[candidate] != original:
+        candidate = f"{base[:24]}_{hashlib.sha256(f'{original}#{n}'.encode()).hexdigest()[:8]}"
+        n += 1
+    return candidate
+
+
 def _sanitize_messages(messages: list[dict] | None) -> list[dict]:
     """Sanitize tool names inside message history for strict endpoints.
 
@@ -387,15 +401,21 @@ class OpenAICompatibleProvider:
                     payload["tools"].append(tool)
                     continue
                 sanitized = _sanitize_tool_name(original)
-                if sanitized != original:
+                # P1-017: disambiguate ANY collision — including an unchanged
+                # valid name (web_get) colliding with a prior tool's sanitized
+                # alias (web.get → web_get). Never silently overwrite the map.
+                if sanitized in name_map and name_map[sanitized] != original:
+                    sanitized = _disambiguate(sanitized, original, name_map)
+                if sanitized == original:
+                    name_map.setdefault(original, original)
+                    payload["tools"].append(tool)
+                else:
                     name_map[sanitized] = original
                     adjusted = copy.deepcopy(tool)
                     adjusted_fn = adjusted.get("function", adjusted) if isinstance(adjusted, dict) else adjusted
                     if isinstance(adjusted_fn, dict):
                         adjusted_fn["name"] = sanitized
                     payload["tools"].append(adjusted)
-                else:
-                    payload["tools"].append(tool)
         if request.response_format:
             payload["response_format"] = request.response_format
         return payload, name_map
@@ -473,8 +493,8 @@ class OpenAICompatibleProvider:
                 cached_tokens=cached_tokens,
                 output_tokens=int(usage_raw.get("completion_tokens", 0) or 0),
                 # Pricing differs wildly per provider (OpenAI vs DeepSeek);
-                # cost estimation is left to the budget layer / future config.
-                cost_usd=0.0,
+                # Unknown is distinct from a verified zero-cost call.
+                cost_usd=None,
             ),
             finish_reason=finish_reason,
             latency_ms=latency_ms,

@@ -19,8 +19,26 @@ from personal_ai_os.model_gateway import (
 # ---------------------------------------------------------------------------
 
 
+class _MemoryVault:
+    def __init__(self):
+        self.values: dict[str, str] = {}
+
+    def set(self, name: str, key: str) -> bool:
+        self.values[name] = key
+        return True
+
+    def get(self, name: str) -> str | None:
+        return self.values.get(name)
+
+    def delete(self, name: str) -> bool:
+        self.values.pop(name, None)
+        return True
+
+
 def _make_store(tmp_path):
-    return ProviderConfigStore(path=tmp_path / "nested" / "profiles.json")
+    return ProviderConfigStore(
+        path=tmp_path / "nested" / "profiles.json", vault=_MemoryVault()
+    )
 
 
 def test_add_and_get_active(tmp_path):
@@ -63,6 +81,45 @@ def test_masked_key_never_leaks(tmp_path):
     masked = store.get("s").masked_key()
     assert "sk-abcdefghijklmnopqrstuvwxyz1234" not in masked
     assert masked.startswith("sk-a") and masked.endswith("1234")
+
+
+def test_profile_file_contains_reference_not_plaintext_secret(tmp_path):
+    store = _make_store(tmp_path)
+    secret = "sk-plaintext-must-not-survive"
+    store.add(ProviderProfile(name="secure", format="openai", api_key=secret))
+
+    raw = store.path.read_text(encoding="utf-8")
+    payload = json.loads(raw)
+    assert secret not in raw
+    assert payload["profiles"]["secure"]["secret_ref"] == "secure"
+    assert store.get("secure").api_key == secret
+
+
+def test_legacy_plaintext_profile_migrates_only_after_vault_write(tmp_path):
+    path = tmp_path / "profiles.json"
+    secret = "sk-legacy-secret"
+    path.write_text(
+        json.dumps(
+            {
+                "active": "legacy",
+                "profiles": {
+                    "legacy": {
+                        "name": "legacy",
+                        "format": "openai",
+                        "api_key": secret,
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    vault = _MemoryVault()
+    store = ProviderConfigStore(path=path, vault=vault)
+
+    assert store.get_active().api_key == secret
+    migrated = path.read_text(encoding="utf-8")
+    assert secret not in migrated
+    assert json.loads(migrated)["profiles"]["legacy"]["secret_ref"] == "legacy"
 
 
 def test_invalid_format_rejected():
@@ -317,3 +374,47 @@ async def test_openai_stream_tool_call():
     assert fn["name"] == "calculator.evaluate"  # mapped back from sanitized
     import json as _json
     assert _json.loads(fn["arguments"]) == {"expression": "1+1"}
+
+
+def test_base_url_requires_https_for_remote(tmp_path, monkeypatch):
+    from personal_ai_os.model_gateway import ProviderConfigStore
+
+    monkeypatch.setenv("PERSONAL_AI_CONFIG_DIR", str(tmp_path))
+    store = ProviderConfigStore(vault=_MemoryVault())
+    with pytest.raises(ValueError, match="https"):
+        store.add(ProviderProfile(name="plain", format="openai", api_key="k",
+                                  base_url="http://api.example.com/v1"))
+    # loopback http is allowed (local models)
+    store.add(ProviderProfile(name="local", format="openai", api_key="k",
+                              base_url="http://localhost:11434/v1"))
+    assert store.get("local") is not None
+
+
+def test_secret_vault_mirrors_to_keyring(monkeypatch):
+    """P2-001 — when keyring is available the key is mirrored into it."""
+    import sys
+    from types import SimpleNamespace
+
+    from personal_ai_os.model_gateway.config import SecretVault
+
+    store = {}
+    fake_keyring = SimpleNamespace(
+        set_password=lambda service, name, key: store.__setitem__(f"{service}:{name}", key),
+        get_password=lambda service, name: store.get(f"{service}:{name}"),
+    )
+    monkeypatch.setitem(sys.modules, "keyring", fake_keyring)
+    assert SecretVault.set("main", "sk-secret") is True
+    assert SecretVault.get("main") == "sk-secret"
+    assert store.get("personal-ai-os:main") == "sk-secret"
+
+
+def test_secret_vault_falls_back_without_keyring(monkeypatch):
+    """P2-001 — without keyring, set/get are no-ops (file remains the store)."""
+    import sys
+
+    from personal_ai_os.model_gateway.config import SecretVault
+
+    monkeypatch.delitem(sys.modules, "keyring", raising=False)
+    monkeypatch.setitem(sys.modules, "keyring", None)  # makes import fail
+    assert SecretVault.set("main", "k") is False
+    assert SecretVault.get("main") is None

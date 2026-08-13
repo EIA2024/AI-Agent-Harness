@@ -258,3 +258,48 @@ async def test_anthropic_message_conversion_helpers():
     assert converted[2]["role"] == "user"
     assert converted[2]["content"][0]["type"] == "tool_result"
     assert converted[2]["content"][0]["tool_use_id"] == "tc1"
+
+
+def test_unknown_model_price_is_reported_as_unknown():
+    from personal_ai_os.model_gateway.provider import estimate_cost_usd
+
+    assert estimate_cost_usd("unpriced-model", 100, 0, 50) is None
+
+
+def _req(tools: list[dict]) -> ModelRequest:
+    return ModelRequest(
+        purpose="assistant",
+        messages=[{"role": "user", "content": "x"}],
+        tools=tools,
+    )
+
+
+def _tool(name: str) -> dict:
+    return {"type": "function", "function": {"name": name, "parameters": {"type": "object"}}}
+
+
+def test_sanitized_tool_names_do_not_collide():
+    """P1-017 — web.get and web_get must not both alias to web_get."""
+    import re
+
+    from personal_ai_os.model_gateway.provider import OpenAICompatibleProvider
+
+    provider = OpenAICompatibleProvider(api_key="k", base_url="https://x/v1")
+    payload, name_map = provider._build_payload(
+        _req([_tool("web.get"), _tool("web_get")])
+    )
+    sanitized = [t["function"]["name"] for t in payload["tools"]]
+    assert len(set(sanitized)) == 2, f"collision: {sanitized}"
+    assert {name_map[s] for s in sanitized} == {"web.get", "web_get"}
+    for s in sanitized:
+        assert re.fullmatch(r"[a-zA-Z0-9_-]+", s)
+
+
+def test_sanitize_is_deterministic():
+    from personal_ai_os.model_gateway.provider import OpenAICompatibleProvider
+
+    provider = OpenAICompatibleProvider(api_key="k", base_url="https://x/v1")
+    tools = [_tool("web.get"), _tool("web_get"), _tool("a.b.c")]
+    _, m1 = provider._build_payload(_req(tools))
+    _, m2 = provider._build_payload(_req(tools))
+    assert m1 == m2

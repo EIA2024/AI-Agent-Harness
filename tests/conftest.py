@@ -25,6 +25,10 @@ for _path in (ROOT, SRC):
 
 # Keep accidental db.session usage off PostgreSQL during tests.
 os.environ.setdefault("DATABASE_URL", "sqlite+aiosqlite:///:memory:")
+# API-key hashing is deliberately fail-closed when no deployment secret is
+# configured.  Tests use an explicit, process-local key so auth fixtures drive
+# the real HMAC path without depending on a developer's environment.
+os.environ.setdefault("PERSONAL_AI_KEY_HASH_SECRET", "pytest-only-key-hash-secret")
 
 from personal_ai_os.db import session as db_session  # noqa: E402
 

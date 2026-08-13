@@ -1,7 +1,8 @@
-"""SQLAlchemy ORM models for Personal AI OS (blueprint §37-§40).
+"""SQLAlchemy ORM models for Personal AI OS.
 
-Single source of truth for persistence. All departments read/write via these
-models through the async session factory in `.session`.
+The ORM is the application-side schema contract; production upgrades are owned
+by Alembic.  Lifecycle/idempotency constraints live in the database as the
+last line of defence against multi-worker races.
 """
 
 from __future__ import annotations
@@ -15,17 +16,18 @@ from sqlalchemy import (
     DateTime,
     Float,
     ForeignKey,
+    Index,
     Integer,
     String,
     Text,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
 def _utcnow() -> datetime:
-    """Timezone-aware UTC now, used as the column default."""
     return datetime.now(UTC)
 
 
@@ -47,7 +49,10 @@ class User(Base):
     id: Mapped[uuid.UUID] = _uuid_pk()
     username: Mapped[str] = mapped_column(String(120), unique=True)
     display_name: Mapped[str | None] = mapped_column(String(200))
+    # Legacy only. New credentials are never stored here; a successful legacy
+    # authentication migrates the row to api_key_hash and clears this value.
     api_key: Mapped[str | None] = mapped_column(String(128), unique=True)
+    api_key_hash: Mapped[str | None] = mapped_column(String(64), index=True)
     timezone: Mapped[str] = mapped_column(String(64), default="UTC")
     config: Mapped[dict] = mapped_column(JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
@@ -90,11 +95,19 @@ class Project(Base):
 
 class Session(Base):
     __tablename__ = "sessions"
-    # Note: a partial unique index on (owner_id, channel, external_conversation_id)
-    # WHERE status='active' AND external_conversation_id IS NOT NULL should be
-    # added via Alembic migration to close the SELECT-then-INSERT race in
-    # SessionRouter.get_or_create. SQLite's NULL handling in UNIQUE constraints
-    # makes declarative partial indexes unwieldy, so rely on the DB migration.
+    __table_args__ = (
+        # Same owner/channel/external conversation must resolve to exactly one
+        # active session.  NULL external ids are intentionally not constrained.
+        Index(
+            "uq_session_active_external_conversation",
+            "owner_id",
+            "channel",
+            "external_conversation_id",
+            unique=True,
+            sqlite_where=text("status = 'active' AND external_conversation_id IS NOT NULL"),
+            postgresql_where=text("status = 'active' AND external_conversation_id IS NOT NULL"),
+        ),
+    )
 
     id: Mapped[uuid.UUID] = _uuid_pk()
     owner_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"))
@@ -105,11 +118,8 @@ class Session(Base):
     title: Mapped[str | None] = mapped_column(String(200))
     status: Mapped[str] = mapped_column(String(32), default="active")
     context: Mapped[dict] = mapped_column(JSON, default=dict)
-    # Soft pointer to the session's active run. Kept as a plain UUID (no FK)
-    # because a hard FK would form a cycle with runs.session_id — PostgreSQL
-    # cannot drop/create tables in a FK cycle, and SQLite's FK pragma would
-    # reject the related flush ordering. The app enforces referential
-    # integrity via the runs.session_id FK.
+    # Soft pointer avoids an FK cycle with runs.session_id. Terminal transitions
+    # clear it with a conditional UPDATE so an older worker cannot clear a newer run.
     active_run_id: Mapped[uuid.UUID | None] = mapped_column(PG_UUID(as_uuid=True), index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
     last_active_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
@@ -117,12 +127,18 @@ class Session(Base):
 
 class Message(Base):
     __tablename__ = "messages"
+    __table_args__ = (
+        # Durable transcript identity. PostgreSQL/SQLite both permit multiple
+        # NULLs, so legacy/session-only messages remain unaffected.
+        Index("uq_message_run_seq", "run_id", "run_seq", unique=True),
+    )
 
     id: Mapped[uuid.UUID] = _uuid_pk()
     session_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("sessions.id"))
     run_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("runs.id"))
+    run_seq: Mapped[int | None] = mapped_column(Integer)
     owner_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"))
-    role: Mapped[str] = mapped_column(String(32))  # user | assistant | tool | system
+    role: Mapped[str] = mapped_column(String(32))
     content: Mapped[str] = mapped_column(Text, default="")
     tool_name: Mapped[str | None] = mapped_column(String(200))
     metadata_: Mapped[dict] = mapped_column("metadata", JSON, default=dict)
@@ -131,6 +147,17 @@ class Message(Base):
 
 class Run(Base):
     __tablename__ = "runs"
+    __table_args__ = (
+        # waiting_approval is still an active run: a second run must not enter
+        # the same session while a human decision is outstanding.
+        Index(
+            "uq_run_one_active_per_session",
+            "session_id",
+            unique=True,
+            sqlite_where=text("status IN ('running', 'waiting_approval')"),
+            postgresql_where=text("status IN ('running', 'waiting_approval')"),
+        ),
+    )
 
     id: Mapped[uuid.UUID] = _uuid_pk()
     owner_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"))
@@ -138,6 +165,8 @@ class Run(Base):
     session_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("sessions.id"))
     parent_run_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("runs.id"))
     status: Mapped[str] = mapped_column(String(32))
+    lease_owner: Mapped[str | None] = mapped_column(String(64), index=True)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
     input: Mapped[dict] = mapped_column(JSON)
     state: Mapped[dict] = mapped_column(JSON, default=dict)
     model_usage: Mapped[dict] = mapped_column(JSON, default=dict)
@@ -153,7 +182,7 @@ class RunStep(Base):
 
     id: Mapped[uuid.UUID] = _uuid_pk()
     run_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("runs.id"))
-    step_type: Mapped[str] = mapped_column(String(64))  # context | decide | tool | respond | ...
+    step_type: Mapped[str] = mapped_column(String(64))
     status: Mapped[str] = mapped_column(String(32))
     data: Mapped[dict] = mapped_column(JSON, default=dict)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
@@ -162,6 +191,9 @@ class RunStep(Base):
 
 class ToolCall(Base):
     __tablename__ = "tool_calls"
+    __table_args__ = (
+        Index("uq_toolcall_run_idem", "run_id", "idempotency_key", unique=True),
+    )
 
     id: Mapped[uuid.UUID] = _uuid_pk()
     run_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("runs.id"))
@@ -173,7 +205,7 @@ class ToolCall(Base):
     result: Mapped[dict | None] = mapped_column(JSON)
     error: Mapped[dict | None] = mapped_column(JSON)
     idempotency_key: Mapped[str | None] = mapped_column(String(64))
-    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=_utcnow)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
@@ -226,7 +258,7 @@ class MemoryLink(Base):
     id: Mapped[uuid.UUID] = _uuid_pk()
     source_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("memories.id"))
     target_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("memories.id"))
-    relation: Mapped[str] = mapped_column(String(32))  # superseded_by | related_to | ...
+    relation: Mapped[str] = mapped_column(String(32))
     confidence: Mapped[float] = mapped_column(Float, default=1.0)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
@@ -297,11 +329,38 @@ class AuditEvent(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
 
-# ---------------------------------------------------------------------------
-# Table registry for tests / migrations
-# ---------------------------------------------------------------------------
+class EventLog(Base):
+    """Durable, run-local ordered event log used by SSE replay."""
+
+    __tablename__ = "event_log"
+    __table_args__ = (
+        Index("uq_event_log_run_seq", "run_id", "seq", unique=True),
+    )
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    run_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("runs.id"), index=True)
+    seq: Mapped[int] = mapped_column(Integer)
+    event_type: Mapped[str] = mapped_column(String(64))
+    data: Mapped[dict] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
 
 ALL_MODELS = [
-    User, Agent, ExternalIdentity, Project, Session, Message, Run, RunStep,
-    ToolCall, Approval, MemoryRow, MemoryLink, Skill, Automation, Artifact, AuditEvent,
+    User,
+    Agent,
+    ExternalIdentity,
+    Project,
+    Session,
+    Message,
+    Run,
+    RunStep,
+    ToolCall,
+    Approval,
+    MemoryRow,
+    MemoryLink,
+    Skill,
+    Automation,
+    Artifact,
+    AuditEvent,
+    EventLog,
 ]

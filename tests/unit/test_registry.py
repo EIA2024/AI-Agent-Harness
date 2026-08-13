@@ -68,6 +68,20 @@ class TestRegisterAndGet:
         assert {t.name for t in tools} == {"filesystem.read", "filesystem.write"}
         assert registry.list_by_namespace("does_not_exist") == []
 
+    def test_non_native_tool_cannot_self_assign_trusted_result(self):
+        registry = ToolRegistry()
+        tool = ToolDescriptor(
+            name="mcp.untrusted",
+            namespace="mcp",
+            description="remote tool",
+            input_schema={"type": "object"},
+            source="mcp",
+            result_trust="trusted_tool",
+        )
+
+        with pytest.raises(ValueError, match="cannot self-assign"):
+            registry.register(tool)
+
 
 class TestSearch:
     def test_search_by_description_keyword(self, registry):
@@ -201,3 +215,87 @@ class TestThreadSafety:
 
         assert errors == []
         assert len(reg.list_all()) == 50 + 100
+
+
+def test_register_rejects_readonly_descriptor_with_mutating_methods():
+    """P0-002 capability invariant — read-only metadata must not expose write verbs."""
+    from personal_ai_os.common.models import ToolDescriptor as TD
+    from personal_ai_os.tool_broker.registry import ToolRegistry
+
+    bad = TD(
+        name="web.poke",
+        namespace="web",
+        description="sneaky",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "url": {"type": "string"},
+                "method": {"type": "string", "enum": ["GET", "POST", "DELETE"]},
+            },
+            "required": ["url"],
+        },
+        risk_level=1,
+        side_effect=False,
+        external_write=False,
+        idempotent=True,
+    )
+    reg = ToolRegistry()
+    with pytest.raises(ValueError, match="capability invariant"):
+        reg.register(bad)
+    assert reg.get("web.poke") is None
+
+
+def test_register_accepts_readonly_get_only():
+    from personal_ai_os.tool_broker.registry import ToolRegistry
+
+    good = make_tool("web.get", "web")
+    good.input_schema = {
+        "type": "object",
+        "properties": {"url": {"type": "string"}, "method": {"type": "string", "enum": ["GET"]}},
+        "required": ["url"],
+    }
+    reg = ToolRegistry()
+    reg.register(good)
+    assert reg.get("web.get") is not None
+
+
+def test_register_accepts_mutating_descriptor_when_capability_claims_write():
+    from personal_ai_os.tool_broker.registry import ToolRegistry
+
+    mutate = make_tool("web.mutate", "web", risk_level=3)
+    mutate.input_schema = {
+        "type": "object",
+        "properties": {"url": {"type": "string"}, "method": {"type": "string", "enum": ["POST", "DELETE"]}},
+        "required": ["url"],
+    }
+    mutate.side_effect = True
+    mutate.external_write = True
+    reg = ToolRegistry()
+    reg.register(mutate)  # no error — metadata matches capability
+    assert reg.get("web.mutate") is not None
+
+
+def test_capability_validator_enforces_risk_ceilings():
+    """P1-013 — destructive→R4, external write→R3+, local side effect→R2+."""
+    from personal_ai_os.tool_broker.registry import ToolRegistry
+
+    destructive = make_tool("danger.rm", "danger", risk_level=1)
+    destructive.destructive = True
+    with pytest.raises(ValueError, match="R4"):
+        ToolRegistry().register(destructive)
+
+    external = make_tool("web.push", "web", risk_level=1)
+    external.side_effect = True
+    external.external_write = True
+    with pytest.raises(ValueError, match="R3"):
+        ToolRegistry().register(external)
+
+    local_write = make_tool("fs.write", "fs", risk_level=1)
+    local_write.side_effect = True
+    with pytest.raises(ValueError, match="R2"):
+        ToolRegistry().register(local_write)
+
+    # a compliant side-effecting tool passes
+    ok = make_tool("fs.write", "fs", risk_level=2)
+    ok.side_effect = True
+    ToolRegistry().register(ok)

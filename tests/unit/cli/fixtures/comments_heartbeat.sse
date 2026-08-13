@@ -1,0 +1,13 @@
+: ping
+
+event: run.started
+data: {"run_id": "r1"}
+
+: ping
+: ping
+
+event: text.delta
+data: {"text": "after heartbeats"}
+
+event: run.completed
+data: {"run_id": "r1", "status": "completed"}

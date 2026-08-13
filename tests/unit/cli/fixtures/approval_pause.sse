@@ -1,0 +1,8 @@
+event: run.started
+data: {"run_id": "r1"}
+
+event: tool.requested
+data: {"tool_name": "email.send", "tool_call": {"id": "call_7", "type": "function", "function": {"name": "email.send", "arguments": "{\"to\": \"a@example.com\", \"subject\": \"Hello\"}"}}}
+
+event: approval.required
+data: {"run_id": "r1", "status": "waiting_approval"}

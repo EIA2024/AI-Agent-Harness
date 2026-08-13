@@ -50,11 +50,141 @@ from personal_ai_os.common.models import (
 )
 from personal_ai_os.common.utils import idempotency_key
 
+
+def _push_tool_event(run_id: str, event: str, payload: dict) -> None:
+    """Forward a tool lifecycle event to the run's live SSE if subscribed (T42)."""
+    from personal_ai_os.agent_runtime import streams
+
+    if run_id and streams.get(run_id) is not None:
+        push_live(run_id, event, payload)
+
+
+def _tool_call_id(pending) -> str | None:  # noqa: ANN001
+    if isinstance(pending, dict):
+        return pending.get("id") or pending.get("tool_call_id")
+    return None
+
+
+def _tool_call_name(pending) -> str:  # noqa: ANN001
+    if isinstance(pending, dict):
+        function = pending.get("function") if isinstance(pending.get("function"), dict) else {}
+        return str(function.get("name") or pending.get("name") or "")
+    return ""
+
+
+def _same_signature(name: str, arguments: dict) -> str:
+    """Stable identity of a tool call (review §B): tool name + canonical args."""
+    return f"{name}:{json.dumps(arguments, sort_keys=True, ensure_ascii=False)}"
+
+
+def _find_prior_success(state: dict, name: str, arguments: dict) -> dict | None:
+    """Return the most recent SUCCESSFUL tool result with the exact same
+    signature, or None. Used to block repeated side-effecting calls."""
+    sig = _same_signature(name, arguments)
+    for entry in reversed(state.get("tool_results") or []):
+        if entry.get("success") and _same_signature(
+            entry.get("tool_name", ""), entry.get("arguments") or {}
+        ) == sig:
+            return entry
+    return None
+
+
+class ToolArgumentParseError(ValueError):
+    """The LLM emitted an invalid ``arguments`` JSON for a tool call.
+
+    P1-031: this must surface as a failed tool result — never be silently
+    replaced with ``{}`` and executed.
+    """
+
+
+class ModelStreamError(Exception):
+    """A model stream broke after producing output (P1-016).
+
+    Falling back to a full ``complete()`` call after deltas were already
+    streamed would silently duplicate cost and could yield a different
+    decision. Fail the run instead; the upper layer may retry with an
+    idempotency token.
+    """
+
+
 logger = logging.getLogger(__name__)
 
-#: Unbounded-autonomous-loop guard — maximum tool calls a single run may make
-#: before the graph forces the model to conclude (blueprint §19, threat #12).
+#: Unbounded-autonomous-loop guard — maximum non-repeat-blocked tool turns a
+#: single run may make before the graph forces the model to conclude.
 MAX_TOOL_CALLS = 5
+#: A repeated identical successful call is already rejected by tool_request.
+#: Give the model one chance to recover with a genuinely different call; if it
+#: ignores the guard twice in a row, reclaim control before MAX_TOOL_CALLS.
+MAX_CONSECUTIVE_REPEAT_BLOCKS = 2
+_REPEAT_BLOCK_CODE = "TOOL_REPEAT_BLOCKED"
+
+
+def _tool_limit_count(state: dict) -> int:
+    """Count tool turns that should consume the global tool-call budget.
+
+    ``TOOL_REPEAT_BLOCKED`` is a runtime pseudo-result: no connector executed
+    and the model is handled by the stricter consecutive-repeat convergence
+    guard below. Counting it again toward ``MAX_TOOL_CALLS`` made the
+    anti-repeat guard itself accelerate global exhaustion.
+    """
+    return sum(
+        1
+        for entry in (state.get("tool_results") or [])
+        if not isinstance(entry, dict) or entry.get("error_code") != _REPEAT_BLOCK_CODE
+    )
+
+
+def _consecutive_repeat_blocks(state: dict) -> int:
+    """Number of trailing identical-call blocks since the last real result."""
+    count = 0
+    for entry in reversed(state.get("tool_results") or []):
+        if isinstance(entry, dict) and entry.get("error_code") == _REPEAT_BLOCK_CODE:
+            count += 1
+        else:
+            break
+    return count
+
+
+def _successful_tool_names(state: dict, *, limit: int = 4) -> list[str]:
+    """Recent successful tool names, de-duplicated for a bounded model hint."""
+    names: list[str] = []
+    seen: set[str] = set()
+    for entry in reversed(state.get("tool_results") or []):
+        if not isinstance(entry, dict) or not entry.get("success"):
+            continue
+        name = str(entry.get("tool_name") or "").strip()
+        if not name or name in seen:
+            continue
+        names.append(name)
+        seen.add(name)
+        if len(names) >= limit:
+            break
+    names.reverse()
+    return names
+
+
+def _tool_convergence_message(state: dict) -> str | None:
+    """Runtime-generated anti-loop reminder placed before the next decision."""
+    names = _successful_tool_names(state)
+    repeats = _consecutive_repeat_blocks(state)
+    if not names and not repeats:
+        return None
+    parts = ["【工具循环收敛约束】"]
+    if names:
+        parts.append(
+            "本轮已经成功获得工具结果（" + ", ".join(names) + "）。"
+            "优先基于这些结果回答；不要为了确认、重试或换一个近似参数而继续调用。"
+        )
+    if repeats:
+        parts.append(
+            f"最近有 {repeats} 次重复调用被 TOOL_REPEAT_BLOCKED 拦截。"
+            "这表示此前等价调用已经成功，不表示工具不可用。"
+        )
+    parts.append(
+        "只有当回答用户仍明确缺少某项必要信息，而且下一次调用会产生实质新信息时，"
+        "才允许继续调用工具。"
+    )
+    return "".join(parts)
 
 
 class RuntimeState(AgentState, total=False):
@@ -69,6 +199,10 @@ class RuntimeState(AgentState, total=False):
     _cached_context: dict
     #: MemGPT-style compaction: summary of turns older than the recent window
     conversation_summary: str
+    #: Diagnostics: total exact-repeat tool requests blocked in this run.
+    tool_repeat_blocked_count: int
+    #: Diagnostics: why the convergence guard finally reclaimed control.
+    tool_loop_guard_reason: str | None
 
 
 # ---------------------------------------------------------------------------
@@ -151,8 +285,10 @@ async def _model_call(deps: _Deps, state: dict, request: ModelRequest) -> ModelR
         try:
             async for ev in stream_method(request):
                 if ev.type == "thinking_delta" and ev.text:
+                    # P0-008: raw chain-of-thought is never pushed to the public
+                    # SSE stream; it is only accumulated for the provider's own
+                    # replay protocol (reasoning_content on the tool call).
                     thinking_parts.append(ev.text)
-                    push_live(run_id, "thinking.delta", {"text": ev.text})
                 elif ev.type == "text_delta" and ev.text:
                     content_parts.append(ev.text)
                     push_live(run_id, "text.delta", {"text": ev.text})
@@ -166,8 +302,19 @@ async def _model_call(deps: _Deps, state: dict, request: ModelRequest) -> ModelR
                     )
                 elif ev.type == "done":
                     usage = ev.usage
-        except Exception:  # fall back to non-streaming on any stream failure
-            logger.warning("Model streaming failed for run %s; retrying non-streaming", run_id, exc_info=True)
+        except Exception as exc:
+            if content_parts or thinking_parts:
+                # P1-016: the stream already produced output — silently re-calling
+                # complete() duplicates cost and can change the decision. Fail.
+                logger.error(
+                    "Model stream broke after producing output for run %s (%s)",
+                    run_id, exc,
+                )
+                raise ModelStreamError(
+                    f"model stream broke after producing output: {exc}"
+                ) from exc
+            # Failed before the first token → a plain complete() call is safe.
+            logger.warning("Model streaming failed before first token for run %s; retrying non-streaming", run_id, exc_info=True)
             return await deps.model_provider.complete(request)
         response = ModelResponse.from_stream(
             model=request.preferred_model or "model",
@@ -188,9 +335,14 @@ async def _model_call(deps: _Deps, state: dict, request: ModelRequest) -> ModelR
 
 
 def _extract_tool_call_fields(pending: Any) -> tuple[str, dict]:
-    """Parse ``{name, arguments}`` out of an LLM-style tool-call dict."""
+    """Parse ``{name, arguments}`` out of an LLM-style tool-call dict.
+
+    Raises :class:`ToolArgumentParseError` when ``arguments`` is not valid JSON
+    (P1-031) — the caller must surface that as a failed tool result instead of
+    executing with ``{}``.
+    """
     if not isinstance(pending, dict):
-        return "", {}
+        raise ToolArgumentParseError("malformed tool call (not an object)")
     function = pending.get("function") if isinstance(pending.get("function"), dict) else {}
     name = function.get("name") or pending.get("name") or ""
     raw_args = function.get("arguments") or pending.get("arguments") or "{}"
@@ -199,21 +351,81 @@ def _extract_tool_call_fields(pending: Any) -> tuple[str, dict]:
     else:
         try:
             arguments = json.loads(raw_args or "{}")
-        except Exception:
-            arguments = {}
+        except Exception as exc:
+            raise ToolArgumentParseError(
+                f"invalid tool arguments JSON: {str(raw_args)[:120]!r}"
+            ) from exc
     if not isinstance(arguments, dict):
-        arguments = {}
+        raise ToolArgumentParseError(
+            f"tool arguments must be a JSON object, got: {str(raw_args)[:120]!r}"
+        )
     return str(name), arguments
 
 
+_PREVIEW_MAX_ITEMS = 40
+_PREVIEW_MAX_CHARS = 2500
+
+# Advice appended when a result was truncated, so the model never mistakes a
+# sample for the full result and knows how to narrow the query.
+_TRUNCATED_HINT = (
+    "listing truncated — the sample above is NOT the full result. To find a "
+    "specific item, use a search/pattern tool or call list/search on a "
+    "narrower path instead of relying on this preview."
+)
+
+
 def _tool_message_content(entry: dict) -> str:
-    text = entry.get("text")
-    if text:
-        return text
+    """Content the model sees for a tool result.
+
+    Prefers the human summary (``text``) but ALWAYS appends a bounded preview of
+    the structured ``data``. Otherwise a connector that summarizes in ``text``
+    (e.g. ``filesystem.list`` → ``"1859 entries"``) starves the model of the
+    actual content, so it cannot make progress and re-issues the same call until
+    the tool-call limit stops it.
+
+    The preview is a sample, not the full result: when it is truncated the
+    message explicitly says so and points at narrower queries, so the model
+    never acts on an incomplete listing as if it were complete.
+    """
+    text = entry.get("text") or ""
     data = entry.get("data")
-    if data:
-        return json.dumps(data, ensure_ascii=False)
-    return str(entry.get("error") or entry.get("content") or "")
+    if not data:
+        return text or str(entry.get("error") or entry.get("content") or "")
+    preview, truncated = _preview_tool_data(data)
+    parts = [p for p in (text, preview) if p]
+    if truncated:
+        parts.append(_TRUNCATED_HINT)
+    return "\n".join(parts)
+
+
+def _preview_tool_data(data: dict) -> tuple[str, bool]:
+    """JSON preview of a tool result with list-heavy keys capped.
+
+    Returns ``(encoded_preview, truncated)`` — ``truncated`` is True when a list
+    was capped or the encoded preview exceeded the character budget. True item
+    counts are placed at the FRONT of the JSON so they survive character
+    truncation and the model is never misled about how many items exist.
+    """
+    preview: dict = {}
+    counts: dict = {}
+    truncated = False
+    for key, value in data.items():
+        if isinstance(value, list) and value and isinstance(value[0], (dict, str)):
+            if len(value) > _PREVIEW_MAX_ITEMS:
+                truncated = True
+                counts[f"{key}_total"] = len(value)
+                preview[key] = value[:_PREVIEW_MAX_ITEMS]
+            else:
+                preview[key] = value
+        else:
+            preview[key] = value
+    encoded = json.dumps({**counts, **preview}, ensure_ascii=False)
+    if len(encoded) > _PREVIEW_MAX_CHARS:
+        encoded = encoded[:_PREVIEW_MAX_CHARS]
+        truncated = True
+    if truncated:
+        encoded += f" …[truncated, total {len(encoded)} chars]"
+    return encoded, truncated
 
 
 def _serialize_tool_result(result: Any, pending: Any, name: str, ctx: ToolExecutionContext,
@@ -224,9 +436,8 @@ def _serialize_tool_result(result: Any, pending: Any, name: str, ctx: ToolExecut
         data = dict(result)
     else:
         data = {"text": str(result)}
-    # Honour the tool descriptor's result_trust; default to trusted_tool for
-    # built-in connectors that don't surface external content.
-    trust = tool_trust or "trusted_tool"
+    # Honour validated descriptors; missing labels fail closed.
+    trust = tool_trust or "untrusted_tool"
     data.update(
         {
             "id": str(uuid.uuid4()),
@@ -269,12 +480,26 @@ def _serialize_rejection(name: str, pending: Any, reason: str,
 
 
 async def intake(state: AgentState, deps: _Deps) -> dict:
-    """Initialize run identity and classify the task level."""
+    """Initialize run identity and classify the task level.
+
+    P1-032: identity fields are required — fail fast instead of fabricating
+    random UUIDs that would silently break persistence / audit scoping.
+    """
+    run_id = state.get("run_id")
+    owner_id = state.get("owner_id")
+    session_id = state.get("session_id")
+    missing = [
+        key
+        for key, value in (("run_id", run_id), ("owner_id", owner_id), ("session_id", session_id))
+        if not value
+    ]
+    if missing:
+        raise ValueError(f"run state missing required identity fields: {missing}")
     task = await deps.classifier.classify(state.get("user_input", ""))
     return {
-        "run_id": state.get("run_id") or str(uuid.uuid4()),
-        "session_id": state.get("session_id"),
-        "owner_id": state.get("owner_id"),
+        "run_id": run_id,
+        "session_id": session_id,
+        "owner_id": owner_id,
         "agent_id": state.get("agent_id"),
         "status": "intake",
         "task": task,
@@ -287,6 +512,8 @@ async def intake(state: AgentState, deps: _Deps) -> dict:
         "memory_candidates": state.get("memory_candidates") or [],
         "skill_candidates": state.get("skill_candidates") or [],
         "model_usage": state.get("model_usage") or {},
+        "tool_repeat_blocked_count": state.get("tool_repeat_blocked_count", 0),
+        "tool_loop_guard_reason": state.get("tool_loop_guard_reason"),
     }
 
 
@@ -310,30 +537,67 @@ async def decide(state: AgentState, deps: _Deps) -> dict:
     Reuses the cached context from ``build_context`` when available, falling
     back to a fresh build only when the cache is absent (e.g. observe loop
     where state has changed).
+
+    Loop-hardening is intentionally enforced *before* the model chooses its
+    next action: successful results produce a concise anti-repeat reminder,
+    exact-repeat pseudo-results do not consume the global connector budget,
+    and two consecutive ignored repeat blocks reclaim tool control early.
     """
     cached = state.get("_cached_context")
     if cached is not None and isinstance(cached, dict) and cached.get("messages"):
         built = cached
     else:
         built = await deps.context_engine.build(state)
-    tools = await _available_tool_schemas(deps.tool_broker, state)
 
-    # Unbounded-autonomous-loop guard (blueprint §19): once the run has made
-    # MAX_TOOL_CALLS tool calls, stop offering tools and force the model to
-    # conclude from what it has, rather than looping forever.
-    if len(state.get("tool_results") or []) >= MAX_TOOL_CALLS:
+    tool_count = _tool_limit_count(state)
+    repeat_blocks = _consecutive_repeat_blocks(state)
+    force_reason: str | None = None
+    if repeat_blocks >= MAX_CONSECUTIVE_REPEAT_BLOCKS:
+        force_reason = "repeat_blocked"
+    elif tool_count >= MAX_TOOL_CALLS:
+        force_reason = "max_tool_calls"
+
+    messages = list(built["messages"])
+    convergence_hint = _tool_convergence_message(state)
+    if convergence_hint:
+        messages.append({"role": "system", "content": convergence_hint})
+
+    if force_reason == "repeat_blocked":
         tools = None
-        messages = list(built["messages"]) + [
+        messages.append(
             {
                 "role": "system",
                 "content": (
-                    "工具调用已达上限，不能再调用任何工具。"
+                    "连续重复工具调用已经被拦截两次，本回合现在停止工具探索。"
+                    "请基于此前成功获得的结果直接回答用户；不得声称工具不可用。"
+                    "如果信息仍不足，明确说明缺失信息即可。"
+                ),
+            }
+        )
+    elif force_reason == "max_tool_calls":
+        tools = None
+        messages.append(
+            {
+                "role": "system",
+                "content": (
+                    "真实工具调用已达上限，不能再调用任何工具。"
                     "请基于已有信息直接回答用户；如果信息不足，如实说明并给出下一步建议。"
                 ),
             }
-        ]
+        )
     else:
-        messages = built["messages"]
+        tools = await _available_tool_schemas(deps.tool_broker, state)
+
+    if force_reason:
+        logger.warning(
+            "Tool-loop guard forced conclusion run=%s reason=%s tool_count=%d "
+            "consecutive_repeat_blocks=%d repeat_blocked_total=%d",
+            state.get("run_id"),
+            force_reason,
+            tool_count,
+            repeat_blocks,
+            state.get("tool_repeat_blocked_count", 0),
+        )
 
     request = ModelRequest(
         purpose="assistant",
@@ -343,18 +607,22 @@ async def decide(state: AgentState, deps: _Deps) -> dict:
     response = await _model_call(deps, state, request)
     usage = _merge_usage(state.get("model_usage"), response.usage)
 
-    # If the loop is exhausted, ignore any (stale) tool call and respond instead.
-    if len(state.get("tool_results") or []) >= MAX_TOOL_CALLS:
+    # A provider may emit a stale tool call even after tools were removed.
+    # Convergence policy is runtime-owned, so ignore it and route to respond.
+    if force_reason:
         response.tool_calls = None
 
     tool_calls = response.tool_calls
+    common: dict = {"model_usage": usage}
+    if force_reason:
+        common["tool_loop_guard_reason"] = force_reason
     if tool_calls:
         pending = tool_calls[0] if isinstance(tool_calls, list) else tool_calls
         return {
             "status": "deciding",
             "pending_tool_call": pending,
             "pending_response": None,
-            "model_usage": usage,
+            **common,
         }
     return {
         "status": "deciding",
@@ -366,7 +634,7 @@ async def decide(state: AgentState, deps: _Deps) -> dict:
             "provider": response.provider,
             "usage": response.usage.to_dict() if response.usage else None,
         },
-        "model_usage": usage,
+        **common,
     }
 
 
@@ -383,7 +651,7 @@ def route_after_decide(state: AgentState) -> str:
 async def plan(state: AgentState, deps: _Deps) -> dict:
     """Generate a plan for L2/L3 tasks before executing tools."""
     steps = await deps.planner.create_plan(state.get("user_input", ""), dict(state))
-    return {"plan": steps, "current_step": 0, "status": "planning"}
+    return {"plan": steps, "current_step": 0, "status": "planning", "_cached_context": None}
 
 
 async def tool_request(state: AgentState, deps: _Deps) -> dict:
@@ -398,7 +666,30 @@ async def tool_request(state: AgentState, deps: _Deps) -> dict:
     sit in front of one).
     """
     pending = state.get("pending_tool_call")
-    name, arguments = _extract_tool_call_fields(pending)
+    try:
+        name, arguments = _extract_tool_call_fields(pending)
+    except ToolArgumentParseError as exc:
+        # P1-031: invalid args must never execute with {} — surface the parse
+        # error as a failed tool result so the model sees it and can recover.
+        return {
+            "status": "executing_tool",
+            "pending_tool_call": None,
+            "pending_approval": None,
+            "tool_results": list(state.get("tool_results") or [])
+            + [
+                {
+                    "id": str(uuid.uuid4()),
+                    "tool_name": _tool_call_name(pending),
+                    "tool_call_id": _tool_call_id(pending),
+                    "tool_call": pending,
+                    "success": False,
+                    "error": f"{exc} [TOOL_ARGUMENT_PARSE_ERROR]",
+                    "error_code": "TOOL_ARGUMENT_PARSE_ERROR",
+                    "arguments": {},
+                }
+            ],
+            "_cached_context": None,  # P0-001: tool_results changed
+        }
     run_uuid = UUID(str(state.get("run_id") or uuid.uuid4()))
     owner_uuid = UUID(str(state.get("owner_id") or uuid.uuid4()))
     session_uuid = UUID(str(state["session_id"])) if state.get("session_id") else None
@@ -411,9 +702,49 @@ async def tool_request(state: AgentState, deps: _Deps) -> dict:
     )
     existing = list(state.get("tool_results") or [])
 
+    # Review §B: the EXACT same call already succeeded earlier in this run — do
+    # NOT re-execute a (possibly side-effecting) tool. Feed the model an explicit
+    # notice so it uses the existing result or changes its approach instead of
+    # burning tool slots on identical repeats.
+    prior = _find_prior_success(state, name, arguments)
+    if prior is not None:
+        summary = str(prior.get("text") or prior.get("error") or "")[:120]
+        blocked = {
+            "id": str(uuid.uuid4()),
+            "tool_name": name,
+            "tool_call_id": _tool_call_id(pending),
+            "tool_call": pending,
+            "success": False,
+            "error": (
+                f"工具 {name} 的这组参数此前已成功执行（结果：{summary or '同上'}）。"
+                "请勿重复相同调用；使用已有结果，或改用 search / 更窄路径 / 不同参数。"
+            ),
+            "error_code": _REPEAT_BLOCK_CODE,
+            "arguments": arguments,
+        }
+        blocked_total = int(state.get("tool_repeat_blocked_count", 0) or 0) + 1
+        logger.info(
+            "Blocked repeated tool call run=%s tool=%s blocked_total=%d",
+            state.get("run_id"),
+            name,
+            blocked_total,
+        )
+        return {
+            "status": "executing_tool",
+            "pending_tool_call": None,
+            "pending_approval": None,
+            "tool_results": existing + [blocked],
+            "tool_repeat_blocked_count": blocked_total,
+            "_cached_context": None,  # P0-001: tool_results changed
+        }
+
+    run_key = str(run_uuid)
+    tool_call_id = _tool_call_id(pending)
     try:
         result = await deps.tool_broker.execute(name, arguments, ctx)
     except ApprovalRequiredError as exc:
+        # P1-030: the connector did NOT run — never emit tool.started before
+        # approval.required (started means "about to execute the connector").
         return {
             "status": "waiting_approval",
             "pending_approval": {
@@ -422,7 +753,36 @@ async def tool_request(state: AgentState, deps: _Deps) -> dict:
                 "risk_level": exc.risk_level,
                 "reason": exc.reason,
             },
+            "_cached_context": None,  # P0-001: approval state changed
         }
+
+    # The connector ran (no approval needed) — emit started, then completed/failed.
+    _push_tool_event(
+        run_key, "tool.started",
+        {"tool_call_id": tool_call_id, "tool_name": name},
+    )
+    if result.success:
+        _push_tool_event(
+            run_key, "tool.completed",
+            {
+                "tool_call_id": tool_call_id,
+                "tool_name": name,
+                "success": True,
+                "latency_ms": getattr(result, "latency_ms", None),
+                "summary": result.text or "",
+            },
+        )
+    else:
+        _push_tool_event(
+            run_key, "tool.failed",
+            {
+                "tool_call_id": tool_call_id,
+                "tool_name": name,
+                "success": False,
+                "latency_ms": getattr(result, "latency_ms", None),
+                "error": result.error_code or result.error or "tool_failed",
+            },
+        )
 
     # Resolve the tool's declared result trust level so the context engine
     # can wrap untrusted content (e.g. web fetches) in DATA markers.
@@ -434,6 +794,7 @@ async def tool_request(state: AgentState, deps: _Deps) -> dict:
         "pending_tool_call": None,
         "pending_approval": None,
         "tool_results": existing + [_serialize_tool_result(result, pending, name, ctx, arguments, tool_trust)],
+        "_cached_context": None,  # P0-001: tool_results changed
     }
 
 
@@ -464,7 +825,11 @@ async def approval(state: AgentState, deps: _Deps) -> dict:
     owner_uuid = UUID(str(state.get("owner_id") or uuid.uuid4()))
     session_uuid = UUID(str(state["session_id"])) if state.get("session_id") else None
 
-    if not (isinstance(decision, dict) and decision.get("decision") == "approved"):
+    approved_decision = isinstance(decision, dict) and decision.get("decision") in (
+        "approved",
+        "approved_with_edits",
+    )
+    if not approved_decision:
         rejected = _serialize_rejection(
             name or str(pending_approval.get("tool_name") or ""),
             pending,
@@ -486,6 +851,7 @@ async def approval(state: AgentState, deps: _Deps) -> dict:
                 "usage": None,
             },
             "tool_results": list(state.get("tool_results") or []) + [rejected],
+            "_cached_context": None,  # P0-001: decision + tool_results changed
         }
 
     if decision.get("edited_arguments"):
@@ -500,6 +866,30 @@ async def approval(state: AgentState, deps: _Deps) -> dict:
         approval_id=UUID(approval_id) if approval_id else None,
     )
     result = await deps.tool_broker.execute(name, arguments, ctx)
+    run_key = str(run_uuid)
+    tool_call_id = _tool_call_id(pending)
+    if result.success:
+        _push_tool_event(
+            run_key, "tool.completed",
+            {
+                "tool_call_id": tool_call_id,
+                "tool_name": name,
+                "success": True,
+                "latency_ms": getattr(result, "latency_ms", None),
+                "summary": result.text or "",
+            },
+        )
+    else:
+        _push_tool_event(
+            run_key, "tool.failed",
+            {
+                "tool_call_id": tool_call_id,
+                "tool_name": name,
+                "success": False,
+                "latency_ms": getattr(result, "latency_ms", None),
+                "error": result.error_code or result.error or "tool_failed",
+            },
+        )
     tool = deps.tool_broker._registry.get(name) if hasattr(deps.tool_broker, "_registry") else None
     tool_trust = getattr(tool, "result_trust", None) if tool is not None else None
     return {
@@ -508,6 +898,7 @@ async def approval(state: AgentState, deps: _Deps) -> dict:
         "pending_approval": None,
         "tool_results": list(state.get("tool_results") or [])
         + [_serialize_tool_result(result, pending, name, ctx, arguments, tool_trust)],
+        "_cached_context": None,  # P0-001: decision + tool_results changed
     }
 
 
@@ -516,15 +907,30 @@ async def execute(state: AgentState, deps: _Deps) -> dict:
 
     Kept as a distinct node so the graph topology matches the blueprint and so
     the runner has a clean point to persist a ``RunStep`` for tool execution.
+
+    P1-029: the plan is an execution constraint — each step transitions
+    ``pending → done`` as it is executed, and ``current_step`` advances so the
+    model sees live plan progress instead of a static display.
     """
-    return {"status": "executing_tool", "current_step": (state.get("current_step") or 0) + 1}
+    plan = list(state.get("plan") or [])
+    step = state.get("current_step", 0)
+    if plan and 0 <= step < len(plan) and isinstance(plan[step], dict):
+        current = dict(plan[step])
+        current["status"] = "done"
+        plan[step] = current
+    return {
+        "status": "executing_tool",
+        "current_step": step + 1,
+        "plan": plan,
+        "_cached_context": None,  # P0-001: plan/step changed
+    }
 
 
 async def observe(state: AgentState, deps: _Deps) -> dict:
     """Fold the latest tool result into the message history, then loop to decide."""
     tool_results = state.get("tool_results") or []
     if not tool_results:
-        return {"status": "observing"}
+        return {"status": "observing", "_cached_context": None}
     latest = tool_results[-1]
     messages = list(state.get("messages") or [])
     tool_call = latest.get("tool_call")
@@ -543,7 +949,9 @@ async def observe(state: AgentState, deps: _Deps) -> dict:
             "name": latest.get("tool_name"),
         }
     )
-    return {"status": "observing", "messages": messages}
+    # P0-001: messages changed → the cached context is stale; force a rebuild in
+    # the next decide, otherwise the model never sees the tool result and loops.
+    return {"status": "observing", "messages": messages, "_cached_context": None}
 
 
 async def respond(state: AgentState, deps: _Deps) -> dict:
@@ -582,6 +990,7 @@ async def respond(state: AgentState, deps: _Deps) -> dict:
         "final_response": content,
         "thinking": thinking,
         "model_usage": usage,
+        "_cached_context": None,  # P0-001: messages changed
     }
 
 
@@ -614,7 +1023,7 @@ async def reflect(state: AgentState, deps: _Deps) -> dict:
                 break
         if len(candidates) >= 5:
             break
-    return {"status": "reflecting", "memory_candidates": candidates, "skill_candidates": []}
+    return {"status": "reflecting", "memory_candidates": candidates, "skill_candidates": [], "_cached_context": None}
 
 
 async def memory_commit(state: AgentState, deps: _Deps) -> dict:
@@ -635,13 +1044,20 @@ async def memory_commit(state: AgentState, deps: _Deps) -> dict:
                 source_type=candidate.get("source_type", "conversation"),
             )
             await deps.memory_store.write(memory)
-    return {"status": "committing_memory"}
+    return {"status": "committing_memory", "_cached_context": None}
 
 
 def route_after_tool_request(state: AgentState) -> str:
-    """Approval needed → approval node; otherwise proceed to execute."""
+    """Approval needed → approval; pseudo-results skip execute → observe."""
     if state.get("status") == "waiting_approval":
         return "approval"
+    results = state.get("tool_results") or []
+    if results and isinstance(results[-1], dict) and results[-1].get("error_code") in {
+        _REPEAT_BLOCK_CODE,
+        "TOOL_ARGUMENT_PARSE_ERROR",
+    }:
+        # No connector executed, so do not mark a plan step done / advance it.
+        return "observe"
     return "execute"
 
 
@@ -704,7 +1120,7 @@ def build_graph(
     graph.add_conditional_edges(
         "tool_request",
         route_after_tool_request,
-        {"execute": "execute", "approval": "approval"},
+        {"execute": "execute", "approval": "approval", "observe": "observe"},
     )
     graph.add_conditional_edges(
         "approval",

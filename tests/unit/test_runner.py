@@ -13,6 +13,7 @@ from personal_ai_os.agent_runtime.runner import RunRunner
 from personal_ai_os.common.models import EventTypes, ModelError, ToolResult
 from personal_ai_os.db import session as db_session
 from personal_ai_os.db.models import Approval, Message, Run, RunStep, ToolCall
+from personal_ai_os.policy_engine.approval import ApprovalEngine
 from personal_ai_os.scheduler.event_bus import EventBus
 from tests.unit.fakes import (
     FakeApprovalEngine,
@@ -46,7 +47,7 @@ def make_runner(*, script, tool_broker=None, event_bus=None, approval_engine=Non
         memory_store=None,
         context_engine=context_engine,
         policy_engine=FakePolicyEngine(),
-        approval_engine=approval_engine,
+        approval_engine=approval_engine or ApprovalEngine(),
         event_bus=event_bus,
         checkpointer=InMemorySaver(),
     )
@@ -113,7 +114,7 @@ async def test_start_completes_run_and_persists_everything(seeded_db):
         tool_calls = (await s.execute(select(ToolCall).where(ToolCall.run_id == run_id))).scalars().all()
         assert len(tool_calls) == 1
         assert tool_calls[0].tool_name == "search"
-        assert tool_calls[0].status == "completed"
+        assert tool_calls[0].status == "success"
 
     assert completed == [EventTypes.RUN_COMPLETED]
     assert provider.i == 2  # decide called twice (tool + final answer)
@@ -167,6 +168,8 @@ async def test_approval_resume_flow(seeded_db):
 
     assert result["status"] == "waiting_approval"
     assert result["state"]["pending_approval"]["tool_name"] == "send_mail"
+    assert result["state"]["pending_approval"]["tool_call_id"]
+    assert result["state"]["pending_approval"]["arguments_preview"] == {"to": "a@b.c"}
     approval_id = result["state"]["pending_approval"]["approval_id"]
     assert created == [EventTypes.APPROVAL_CREATED]
     assert len(broker.calls) == 1  # only the policy check so far
@@ -185,10 +188,47 @@ async def test_approval_resume_flow(seeded_db):
     async with db_session.session_scope() as s:
         approval = await s.get(Approval, uuid.UUID(approval_id))
         assert approval.status == "approved"
-        tool_calls = (await s.execute(select(ToolCall).where(ToolCall.run_id == uuid.UUID(result["id"])))).scalars().all()
+        tool_calls = (
+            await s.execute(
+                select(ToolCall).where(ToolCall.run_id == uuid.UUID(result["id"]))
+            )
+        ).scalars().all()
         assert len(tool_calls) == 1
-        assert tool_calls[0].status == "completed"
+        assert tool_calls[0].status == "success"
         assert str(tool_calls[0].approval_id) == approval_id
+
+    assert len(broker.calls) == 2  # policy check + real execution
+
+
+async def test_approval_resume_streams_in_background(seeded_db):
+    from personal_ai_os.agent_runtime import event_log
+
+    owner_id, session_id = seeded_db
+    broker = make_approval_broker()
+    runner, _, _ = make_runner(
+        script=[
+            {"content": None, "tool_calls": [tool_call("send_mail", {"to": "a@b.c"})]},
+            {"content": "邮件已发送", "tool_calls": None},
+        ],
+        tool_broker=broker,
+    )
+    paused = await runner.start(
+        session_id=session_id, owner_id=owner_id, user_input="帮我发一封邮件"
+    )
+    approval_id = paused["state"]["pending_approval"]["approval_id"]
+
+    resumed = await runner.resume_streaming(
+        paused["id"], approval_id=approval_id, decision="approved"
+    )
+    assert resumed["status"] == "running"
+    task = runner._bg_tasks[paused["id"]]
+    await task
+
+    final = await runner.get_run(paused["id"])
+    assert final["status"] == "completed"
+    replay = await event_log.replay_run_events(paused["id"])
+    assert replay[-1]["event"] == "run.completed"
+    assert [item["seq"] for item in replay] == list(range(1, len(replay) + 1))
 
     assert len(broker.calls) == 2  # policy check + real execution
 

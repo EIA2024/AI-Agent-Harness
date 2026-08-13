@@ -22,9 +22,23 @@ class FakeRunner:
 
     async def cancel(self, *, run_id):
         self.cancelled.append(run_id)
+        async with session_scope() as session:
+            run = await session.get(Run, run_id)
+            run.status = "cancelled"
 
     async def resume(self, *, run_id, approval_id=None, decision=None, edited_arguments=None):
         self.resumed.append((run_id, approval_id, decision, edited_arguments))
+        async with session_scope() as session:
+            run = await session.get(Run, run_id)
+            run.status = "running"
+            await session.flush()
+            await session.refresh(run)
+            return {
+                "id": str(run.id),
+                "status": run.status,
+                "input": run.input,
+                "state": run.state,
+            }
 
 
 async def _make_user(api_key: str) -> User:
@@ -78,6 +92,65 @@ async def test_run_detail(make_api, db):
 
         missing = await ac.get(f"/v1/runs/{uuid.uuid4()}", headers=headers)
         assert missing.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_run_detail_hides_internal_context_and_secrets(make_api, db):
+    u = await _make_user("runs-private-key")
+    async with session_scope() as session:
+        run = Run(
+            owner_id=u.id,
+            status="completed",
+            input={"api_key": "input-secret"},
+            state={
+                "final_response": "ok",
+                "_cached_context": {"system_prompt": "private prompt"},
+                "tool_results": [{"token": "result-secret"}],
+            },
+            started_at=datetime.now(UTC),
+        )
+        session.add(run)
+        await session.flush()
+        run_id = run.id
+
+    async with make_api(services=ServiceContainer()) as ac:
+        response = await ac.get(
+            f"/v1/runs/{run_id}", headers={"X-API-Key": "runs-private-key"}
+        )
+
+    body = response.json()
+    assert "_cached_context" not in body["state"]
+    assert body["input"]["api_key"] == "[REDACTED]"
+    assert body["state"]["tool_results"][0]["token"] == "[REDACTED]"
+    assert "input-secret" not in response.text
+    assert "result-secret" not in response.text
+
+
+@pytest.mark.asyncio
+async def test_run_list(make_api, db):
+    """T40 — owner-scoped runs listing with filters + pagination."""
+    u = await _make_user("runs-key")
+    await _make_run(u.id, status="completed")
+    await _make_run(u.id, status="failed")
+    # another owner's run must be invisible
+    other = await _make_user("other-key")
+    await _make_run(other.id, status="running")
+    headers = {"X-API-Key": "runs-key"}
+
+    async with make_api(services=ServiceContainer()) as ac:
+        r = await ac.get("/v1/runs", headers=headers)
+        assert r.status_code == 200
+        body = r.json()
+        assert len(body) == 2  # only this owner's runs
+        statuses = {x["status"] for x in body}
+        assert statuses == {"completed", "failed"}
+
+        filtered = await ac.get("/v1/runs", params={"status": "failed"}, headers=headers)
+        assert len(filtered.json()) == 1
+        assert filtered.json()[0]["status"] == "failed"
+
+        one = await ac.get("/v1/runs", params={"limit": 1}, headers=headers)
+        assert len(one.json()) == 1
 
 
 @pytest.mark.asyncio
@@ -213,3 +286,31 @@ async def test_audit_list(make_api, db):
         # other user sees nothing
         other = await ac.get("/v1/audit", headers={"X-API-Key": "other-key"})
         assert other.json() == []
+
+
+@pytest.mark.asyncio
+async def test_automation_run_501_does_not_touch_last_run_at(make_api):
+    """P1-034 — a 501 stub must not record a run attempt."""
+    await _ensure_auto_user()
+    from sqlalchemy import select
+
+    from personal_ai_os.db.models import Automation
+
+    async with make_api(services=ServiceContainer()) as ac:
+        created = await ac.post(
+            "/v1/automations",
+            json={
+                "name": "Unwired",
+                "trigger_type": "cron",
+                "trigger_config": {"cron": "0 8 * * *"},
+                "prompt": "do something",
+            },
+            headers={"X-API-Key": _AUTO_KEY},
+        )
+        auto_id = created.json()["id"]
+        ran = await ac.post(f"/v1/automations/{auto_id}/run", headers={"X-API-Key": _AUTO_KEY})
+        assert ran.status_code == 501
+        async with session_scope() as s:
+            row = (await s.execute(select(Automation).where(Automation.id == uuid.UUID(auto_id)))).scalars().first()
+            assert row is not None
+            assert row.last_run_at is None

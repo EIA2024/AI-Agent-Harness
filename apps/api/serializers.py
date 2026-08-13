@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from personal_ai_os.common.utils import LogSanitizer
 from personal_ai_os.db.models import (
     Approval,
     AuditEvent,
@@ -32,7 +33,13 @@ def user_to_dict(u: User) -> dict:
     }
 
 
-def session_to_dict(s: Session, *, messages: list[Message] | None = None) -> dict:
+def session_to_dict(
+    s: Session,
+    *,
+    messages: list[Message] | None = None,
+    message_count: int | None = None,
+    active_run_status: str | None = None,
+) -> dict:
     data = {
         "id": _u(s.id),
         "owner_id": _u(s.owner_id),
@@ -46,6 +53,10 @@ def session_to_dict(s: Session, *, messages: list[Message] | None = None) -> dic
         "created_at": _iso(s.created_at),
         "last_active_at": _iso(s.last_active_at),
     }
+    if message_count is not None:
+        data["message_count"] = message_count
+    if active_run_status is not None:
+        data["active_run_status"] = active_run_status
     if messages is not None:
         data["messages"] = [message_to_dict(m) for m in messages]
     return data
@@ -70,6 +81,11 @@ def run_to_dict(
     steps: list[RunStep] | None = None,
     tool_calls: list[ToolCall] | None = None,
 ) -> dict:
+    public_state = {
+        key: value
+        for key, value in (r.state or {}).items()
+        if not str(key).startswith("_") and key not in {"thinking", "reasoning_content"}
+    }
     data = {
         "id": _u(r.id),
         "owner_id": _u(r.owner_id),
@@ -77,8 +93,8 @@ def run_to_dict(
         "session_id": _u(r.session_id),
         "parent_run_id": _u(r.parent_run_id),
         "status": r.status,
-        "input": r.input,
-        "state": r.state,
+        "input": LogSanitizer.sanitize_dict(r.input or {}),
+        "state": LogSanitizer.sanitize_dict(public_state),
         "model_usage": r.model_usage,
         "cost": r.cost,
         "error": r.error,
@@ -99,7 +115,7 @@ def step_to_dict(s: RunStep) -> dict:
         "run_id": _u(s.run_id),
         "step_type": s.step_type,
         "status": s.status,
-        "data": s.data,
+        "data": LogSanitizer.sanitize_dict(s.data or {}),
         "started_at": _iso(s.started_at),
         "completed_at": _iso(s.completed_at),
     }
@@ -110,12 +126,12 @@ def tool_call_to_dict(t: ToolCall) -> dict:
         "id": _u(t.id),
         "run_id": _u(t.run_id),
         "tool_name": t.tool_name,
-        "arguments": t.arguments,
+        "arguments": LogSanitizer.sanitize_dict(t.arguments or {}),
         "risk_level": t.risk_level,
         "approval_id": _u(t.approval_id),
         "status": t.status,
-        "result": t.result,
-        "error": t.error,
+        "result": LogSanitizer.sanitize_dict(t.result or {}) if t.result else None,
+        "error": LogSanitizer.sanitize_dict(t.error or {}) if t.error else None,
         "idempotency_key": t.idempotency_key,
         "started_at": _iso(t.started_at),
         "completed_at": _iso(t.completed_at),
@@ -130,7 +146,7 @@ def approval_to_dict(a: Approval) -> dict:
         "owner_id": _u(a.owner_id),
         "action_summary": a.action_summary,
         "tool_name": a.tool_name,
-        "arguments_preview": a.arguments_preview,
+        "arguments_preview": LogSanitizer.sanitize_dict(a.arguments_preview or {}),
         "risk_level": a.risk_level,
         "risk_reason": a.risk_reason,
         "argument_hash": a.argument_hash,

@@ -28,7 +28,7 @@ def ok_handler(request: httpx.Request) -> httpx.Response:
 async def test_list_tools():
     connector = HttpFetchConnector()
     tools = await connector.list_tools()
-    assert len(tools) == 1
+    assert len(tools) == 2  # read fetch + mutating request (P0-002)
     tool = tools[0]
     assert tool.name == "http_fetch.fetch"
     assert tool.risk_level == 1
@@ -49,7 +49,8 @@ class TestNormalFetch:
         assert result.truncated is False
 
     @pytest.mark.asyncio
-    async def test_post_with_body(self):
+    async def test_post_with_body_via_mutate(self):
+        """P0-002 — side-effecting verbs live on http_request.mutate, not fetch."""
         def handler(request: httpx.Request) -> httpx.Response:
             assert request.method == "POST"
             assert request.read() == b"payload"
@@ -57,12 +58,52 @@ class TestNormalFetch:
 
         connector = HttpFetchConnector(transport=mock_transport(handler))
         result = await connector.execute(
-            "http_fetch.fetch",
+            "http_request.mutate",
             {"url": "https://example.com/submit", "method": "POST", "body": "payload"},
             ctx(),
         )
         assert result.success
         assert result.data["status_code"] == 201
+
+    @pytest.mark.asyncio
+    async def test_fetch_rejects_post(self):
+        """P0-002 — the read-only tool must refuse a mutating method."""
+        def handler(request: httpx.Request) -> httpx.Response:
+            raise AssertionError("fetch must not send POST")
+
+        connector = HttpFetchConnector(transport=mock_transport(handler))
+        result = await connector.execute(
+            "http_fetch.fetch",
+            {"url": "https://example.com/submit", "method": "POST", "body": "payload"},
+            ctx(),
+        )
+        assert result.success is False
+        assert result.error_code == "HTTP_METHOD_NOT_ALLOWED"
+
+    @pytest.mark.asyncio
+    async def test_mutate_rejects_get(self):
+        """P0-002 — the mutating tool must refuse a read-only method."""
+        connector = HttpFetchConnector(transport=mock_transport(ok_handler))
+        result = await connector.execute(
+            "http_request.mutate",
+            {"url": "https://example.com/x", "method": "GET"},
+            ctx(),
+        )
+        assert result.success is False
+        assert result.error_code == "HTTP_METHOD_NOT_ALLOWED"
+
+    @pytest.mark.asyncio
+    async def test_list_tools_exposes_both(self):
+        connector = HttpFetchConnector(transport=mock_transport(ok_handler))
+        tools = await connector.list_tools()
+        by_name = {t.name: t for t in tools}
+        assert "http_fetch.fetch" in by_name
+        assert "http_request.mutate" in by_name
+        assert by_name["http_fetch.fetch"].risk_level == 1
+        assert by_name["http_fetch.fetch"].side_effect is False
+        assert by_name["http_request.mutate"].risk_level == 3
+        assert by_name["http_request.mutate"].side_effect is True
+        assert by_name["http_request.mutate"].external_write is True
 
     @pytest.mark.asyncio
     async def test_custom_headers_passed(self):
@@ -87,6 +128,26 @@ class TestNormalFetch:
         result = await connector.execute("http_fetch.fetch", {"url": "https://example.com/x"}, ctx())
         assert result.success is False
         assert result.error_code == "HTTP_ERROR"
+
+    @pytest.mark.asyncio
+    async def test_model_arguments_cannot_smuggle_credentials(self):
+        connector = HttpFetchConnector(transport=mock_transport(ok_handler))
+        header_result = await connector.execute(
+            "http_fetch.fetch",
+            {
+                "url": "https://example.com/x",
+                "headers": {"Authorization": "Bearer secret"},
+            },
+            ctx(),
+        )
+        url_result = await connector.execute(
+            "http_fetch.fetch",
+            {"url": "https://user:password@example.com/x"},
+            ctx(),
+        )
+
+        assert header_result.error_code == "HTTP_CREDENTIALS_NOT_ALLOWED"
+        assert url_result.error_code == "HTTP_CREDENTIALS_NOT_ALLOWED"
 
 
 class TestTimeout:
@@ -205,3 +266,42 @@ def test_html_to_text_strips_markup():
     assert "style" not in text and "color:red" not in text
     assert "标题" in text and "第一段 & 内容" in text and "项目一" in text
     assert text.startswith("标题") or "标题" in text
+
+
+def test_mixed_private_public_resolution_is_rebinding_signal(monkeypatch):
+    """P1-012 — a hostname resolving to private AND public is blocked."""
+    from connectors.http_fetch.connector import _resolves_to_mixed_private_public
+
+    def mixed(host, port=None, *a, **k):
+        return [(2, 1, 6, "", ("10.0.0.5", 0)), (2, 1, 6, "", ("93.184.216.34", 0))]
+
+    monkeypatch.setattr("socket.getaddrinfo", mixed)
+    assert _resolves_to_mixed_private_public("rebind.example") is True
+
+    def only_public(host, port=None, *a, **k):
+        return [(2, 1, 6, "", ("93.184.216.34", 0))]
+
+    monkeypatch.setattr("socket.getaddrinfo", only_public)
+    assert _resolves_to_mixed_private_public("rebind.example") is False
+
+    def only_private(host, port=None, *a, **k):
+        return [(2, 1, 6, "", ("10.0.0.5", 0))]
+
+    monkeypatch.setattr("socket.getaddrinfo", only_private)
+    assert _resolves_to_mixed_private_public("rebind.example") is False  # covered by _resolve_private
+
+
+def test_validated_dns_answer_is_pinned_into_request_url(monkeypatch):
+    """The eventual socket target is the exact public IP that was validated."""
+    from connectors.http_fetch.connector import _pinned_request_url, _resolve_addresses
+
+    def public(host, port=None, *args, **kwargs):
+        return [(2, 1, 6, "", ("93.184.216.34", 0))]
+
+    monkeypatch.setattr("socket.getaddrinfo", public)
+    addresses = _resolve_addresses("safe.example")
+
+    assert addresses == ["93.184.216.34"]
+    assert _pinned_request_url(
+        "https://safe.example:8443/path?q=1", addresses[0]
+    ) == "https://93.184.216.34:8443/path?q=1"
