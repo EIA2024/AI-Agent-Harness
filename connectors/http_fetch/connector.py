@@ -34,6 +34,12 @@ logger = logging.getLogger(__name__)
 DEFAULT_TIMEOUT = 10.0
 MAX_TIMEOUT = 30.0
 DEFAULT_MAX_RESPONSE_BYTES = 2 * 1024 * 1024  # 2 MiB
+_FORBIDDEN_CREDENTIAL_HEADERS = {
+    "authorization",
+    "cookie",
+    "proxy-authorization",
+    "x-api-key",
+}
 
 
 def _is_private_ip(ip_str: str) -> bool:
@@ -97,6 +103,24 @@ def _resolves_to_mixed_private_public(host: str) -> bool:
     seen_private = any(_is_private_ip(info[4][0]) for info in infos)
     seen_public = any(not _is_private_ip(info[4][0]) for info in infos)
     return seen_private and seen_public
+
+
+def _resolve_addresses(host: str) -> list[str]:
+    """Resolve once and return unique addresses used for validation + pinning."""
+    try:
+        literal = ipaddress.ip_address(host)
+    except ValueError:
+        try:
+            infos = socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)
+        except OSError:
+            return []
+        return list(dict.fromkeys(str(info[4][0]) for info in infos))
+    return [str(literal)]
+
+
+def _pinned_request_url(url: str, address: str) -> str:
+    """Replace only the network destination, preserving scheme/path/query."""
+    return str(httpx.URL(url).copy_with(host=address))
 
 
 class _TextExtractor(HTMLParser):
@@ -280,6 +304,24 @@ class HttpFetchConnector:
                 return True
         return False
 
+    def _blocked_private_target(self, host: str) -> tuple[bool, bool]:
+        """Return ``(private, mixed)`` for the effective network transport.
+
+        A caller-injected transport (notably ``httpx.MockTransport``) owns DNS
+        and connection routing, so resolving the display hostname through the
+        host OS is both unrelated and non-deterministic. Literal private IPs and
+        localhost remain blocked regardless of transport.
+        """
+        literal_or_local = host.lower() == "localhost"
+        try:
+            ipaddress.ip_address(host)
+            literal_or_local = True
+        except ValueError:
+            pass
+        if self._transport is not None and not literal_or_local:
+            return False, False
+        return _resolve_private(host), _resolves_to_mixed_private_public(host)
+
     # ------------------------------------------------------------------
     # Execution
     # ------------------------------------------------------------------
@@ -290,24 +332,53 @@ class HttpFetchConnector:
         host = parsed.hostname
         if parsed.scheme not in ("http", "https") or not host:
             return ToolResult.fail(error=f"invalid URL: {url!r}", error_code="HTTP_URL_INVALID")
+        if parsed.username is not None or parsed.password is not None:
+            return ToolResult.fail(
+                error="credentials embedded in URLs are not allowed",
+                error_code="HTTP_CREDENTIALS_NOT_ALLOWED",
+            )
 
         if not self._host_allowed(host):
             logger.warning("http_fetch: domain %r not in allowlist", host)
             return ToolResult.fail(
                 error=f"domain {host!r} is not in the allowlist", error_code="DOMAIN_NOT_ALLOWED",
             )
-        if not self.allow_private and _resolve_private(host):
+        private_target, mixed_target = self._blocked_private_target(host)
+        if not self.allow_private and private_target:
             logger.warning("http_fetch: blocking SSRF target %r", host)
             return ToolResult.fail(
                 error=f"refusing to fetch private/loopback address: {host}", error_code="SSRF_BLOCKED",
             )
-        if not self.allow_private and _resolves_to_mixed_private_public(host):
+        if not self.allow_private and mixed_target:
             # P1-012: DNS-rebinding signal — resolves to private AND public.
             logger.warning("http_fetch: blocking mixed-resolution host %r (DNS rebinding?)", host)
             return ToolResult.fail(
                 error=f"refusing to fetch host with mixed private/public resolution: {host}",
                 error_code="SSRF_BLOCKED",
             )
+
+        request_url = url
+        request_extensions: dict[str, Any] | None = None
+        pinned_host_header: str | None = None
+        if self._transport is None and not self.allow_private:
+            addresses = _resolve_addresses(host)
+            if not addresses:
+                return ToolResult.fail(
+                    error=f"could not resolve host: {host}", error_code="HTTP_DNS_ERROR"
+                )
+            # Validate every answer from the same lookup used to choose the
+            # connection target. The HTTP client then connects to that exact IP,
+            # closing the DNS check/use race.
+            if any(_is_private_ip(address) for address in addresses):
+                return ToolResult.fail(
+                    error=f"refusing to fetch private/loopback address: {host}",
+                    error_code="SSRF_BLOCKED",
+                )
+            request_url = _pinned_request_url(url, addresses[0])
+            pinned_host_header = host
+            if parsed.port is not None:
+                pinned_host_header += f":{parsed.port}"
+            request_extensions = {"sni_hostname": host}
 
         short = tool.split(".")[-1] if "." in tool else tool
         method = str(arguments.get("method", "GET")).upper()
@@ -326,7 +397,20 @@ class HttpFetchConnector:
         else:
             return ToolResult.fail(error=f"unknown http tool: {tool}", error_code="UNKNOWN_TOOL")
 
-        headers = arguments.get("headers") or {}
+        headers = httpx.Headers(arguments.get("headers") or {})
+        forbidden = _FORBIDDEN_CREDENTIAL_HEADERS.intersection(
+            name.lower() for name in headers.keys()
+        )
+        if forbidden:
+            return ToolResult.fail(
+                error=(
+                    "credential-bearing headers are not accepted from model arguments: "
+                    + ", ".join(sorted(forbidden))
+                ),
+                error_code="HTTP_CREDENTIALS_NOT_ALLOWED",
+            )
+        if pinned_host_header is not None:
+            headers["Host"] = pinned_host_header
         body = arguments.get("body")
         timeout = min(float(arguments.get("timeout", self.default_timeout)), MAX_TIMEOUT)
 
@@ -342,7 +426,13 @@ class HttpFetchConnector:
             async with httpx.AsyncClient(**client_kwargs) as client:
                 try:
                     async with asyncio.timeout(timeout):
-                        response = await client.request(method, url, headers=headers, content=body)
+                        response = await client.request(
+                            method,
+                            request_url,
+                            headers=headers,
+                            content=body,
+                            extensions=request_extensions,
+                        )
                 except TimeoutError:
                     return ToolResult.fail(
                         error=f"request to {url!r} timed out after {timeout}s", error_code="HTTP_TIMEOUT",

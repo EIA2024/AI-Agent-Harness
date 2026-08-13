@@ -19,6 +19,17 @@ async def test_persistent_checkpointer_opens_sqlite_file(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_production_checkpointer_rejects_non_postgres(monkeypatch):
+    from personal_ai_os.gateway.services import _open_persistent_checkpointer
+
+    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.setenv("DATABASE_URL", "sqlite+aiosqlite:///prod.db")
+
+    with pytest.raises(RuntimeError, match="requires PostgreSQL"):
+        await _open_persistent_checkpointer()
+
+
+@pytest.mark.asyncio
 async def test_runner_uses_persistent_checkpointer(tmp_path, monkeypatch):
     """RunRunner wired through complete_wiring compiles with the SQLite saver."""
     monkeypatch.setenv("PERSONAL_AI_DATA_DIR", str(tmp_path))
@@ -93,4 +104,5 @@ async def test_durable_event_log_append_and_replay():
     events = await event_log.replay_run_events(run_id)
     types = [e["event"] for e in events]
     assert types == ["run.started", "run.completed"]
+    assert [e["seq"] for e in events] == [1, 2]
     assert events[1]["data"]["status"] == "completed"

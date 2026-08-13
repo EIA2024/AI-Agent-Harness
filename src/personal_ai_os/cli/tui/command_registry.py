@@ -20,7 +20,7 @@ class CommandSpec:
 REGISTRY: tuple[CommandSpec, ...] = (
     CommandSpec("help", "Show key bindings and commands", "cmd_help"),
     CommandSpec("status", "Show session, model, run and connection state", "cmd_status"),
-    CommandSpec("context", "Show context summary", "cmd_status"),
+    CommandSpec("context", "Show context summary", "cmd_context"),
     CommandSpec("memory", "List / search memories", "cmd_memory"),
     CommandSpec("tools", "List server-registered tools", "cmd_tools"),
     CommandSpec("approvals", "List pending approvals", "cmd_approvals"),

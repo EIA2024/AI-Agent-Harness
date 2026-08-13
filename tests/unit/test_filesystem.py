@@ -6,6 +6,7 @@ import os
 from uuid import uuid4
 
 import pytest
+import regex as safe_regex
 
 from connectors.filesystem.connector import FilesystemConnector
 from personal_ai_os.common.models import ToolExecutionContext
@@ -87,6 +88,19 @@ class TestRead:
             assert result.success is False
             assert "escapes the allowed root" in result.error
 
+    @pytest.mark.asyncio
+    async def test_symlink_is_rejected_even_when_target_is_inside_root(self, connector, root):
+        link = root / "notes-link.txt"
+        try:
+            link.symlink_to(root / "notes.txt")
+        except OSError:
+            pytest.skip("symlinks are unavailable on this host")
+        result = await connector.execute(
+            "filesystem.read", {"path": "notes-link.txt"}, ctx()
+        )
+        assert result.success is False
+        assert "symbolic link" in result.error
+
 
 class TestList:
     @pytest.mark.asyncio
@@ -147,6 +161,21 @@ class TestSearch:
         result = await connector.execute("filesystem.search", {"path": ".", "pattern": "SECRET"}, ctx())
         assert result.success
         assert result.data["matches"] == []
+
+    @pytest.mark.asyncio
+    async def test_regex_timeout_fails_closed(self, connector, monkeypatch):
+        class SlowRegex:
+            def search(self, line, *, timeout):
+                raise TimeoutError
+
+        monkeypatch.setattr(safe_regex, "compile", lambda pattern: SlowRegex())
+        result = await connector.execute(
+            "filesystem.search",
+            {"path": ".", "pattern": "(a+)+$", "mode": "regex"},
+            ctx(),
+        )
+        assert result.success is False
+        assert result.error_code == "REGEX_TIMEOUT"
 
 
 class TestWrite:

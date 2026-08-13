@@ -33,11 +33,13 @@ MODEL_PRICING: dict[str, dict[str, float]] = {
 }
 
 
-def estimate_cost_usd(model: str, input_tokens: int, cached_tokens: int, output_tokens: int) -> float:
+def estimate_cost_usd(
+    model: str, input_tokens: int, cached_tokens: int, output_tokens: int
+) -> float | None:
     """Estimate the USD cost of a call given the per-model pricing table."""
     price = MODEL_PRICING.get(model)
     if price is None:
-        return 0.0
+        return None
     return (
         input_tokens * price["input"] + cached_tokens * price["cached"] + output_tokens * price["output"]
     ) / 1_000_000
@@ -491,8 +493,8 @@ class OpenAICompatibleProvider:
                 cached_tokens=cached_tokens,
                 output_tokens=int(usage_raw.get("completion_tokens", 0) or 0),
                 # Pricing differs wildly per provider (OpenAI vs DeepSeek);
-                # cost estimation is left to the budget layer / future config.
-                cost_usd=0.0,
+                # Unknown is distinct from a verified zero-cost call.
+                cost_usd=None,
             ),
             finish_reason=finish_reason,
             latency_ms=latency_ms,

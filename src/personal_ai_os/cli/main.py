@@ -187,17 +187,20 @@ def _doctor(
 @app.command("chat", help="Interactive chat (legacy alias of the default UI).", hidden=True)
 def chat_legacy(
     session: str | None = typer.Option(None, "--session", help="Existing session id"),
-    no_thinking: bool = typer.Option(False, "--no-thinking", help="Hide chain of thought"),
+    no_thinking: bool = typer.Option(
+        False,
+        "--no-thinking",
+        help="Deprecated compatibility flag; private model reasoning is always hidden",
+    ),
 ) -> None:
     _interactive_with(session=session, no_thinking=no_thinking)
 
 
 def _interactive_with(*, session: str | None, no_thinking: bool) -> None:
-    import argparse
+    del no_thinking  # raw provider reasoning is never a supported output mode
+    from personal_ai_os.cli.tui import run_app
 
-    from personal_ai_os.cli.legacy import cmd_chat
-
-    cmd_chat(argparse.Namespace(session=session, no_thinking=no_thinking))
+    run_app(session_id=session)
 
 
 @app.command("send", help="Send a single message (deprecated; use `exec`).", hidden=True)

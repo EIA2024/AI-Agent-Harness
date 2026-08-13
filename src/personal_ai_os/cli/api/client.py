@@ -152,48 +152,68 @@ class AsyncAPIClient:
     async def stream_run(self, run_id: str) -> AsyncIterator[ServerEvent]:
         """Subscribe to ``GET /v1/runs/{id}/stream`` and yield decoded events.
 
-        P1-019: if a live queue overflowed server-side the envelope ``seq`` jumps
-        by more than one — the client detects the gap and yields a warning event
-        so callers never mistake a gappy stream for a complete one.
+        A non-terminal disconnect is retried with ``Last-Event-ID``. Stable
+        event IDs and sequence numbers make overlap harmless and gaps explicit.
         """
-        decoder = SSEDecoder()
-        headers = {"X-API-Key": self.api_key}
+        terminal_events = {
+            "run.completed",
+            "run.failed",
+            "run.cancelled",
+            "approval.required",
+        }
         last_seq: int | None = None
-        try:
-            async with self._http.stream(
-                "GET", f"/v1/runs/{run_id}/stream", headers=headers
-            ) as response:
-                if response.status_code >= 400:
-                    body = await response.aread()
-                    detail = _extract_detail_from_bytes(body)
-                    raise errors.classify(response.status_code, detail)
-                async for line in response.aiter_lines():
-                    for event in decoder.feed_line(line):
-                        if event.malformed:
-                            yield event
-                            continue
-                        seq = event.data.get("seq")
-                        if (
-                            seq is not None
-                            and last_seq is not None
-                            and isinstance(seq, int)
-                            and seq != last_seq + 1
-                        ):
-                            yield ServerEvent(
-                                event="stream.gap",
-                                data={
-                                    "message": f"SSE gap detected: seq {last_seq} → {seq}",
-                                    "from_seq": last_seq,
-                                    "to_seq": seq,
-                                },
+        last_event_id: str | None = None
+        seen_event_ids: set[str] = set()
+        last_transport_error: httpx.HTTPError | None = None
+
+        for attempt in range(3):
+            decoder = SSEDecoder()
+            headers = {"X-API-Key": self.api_key}
+            if last_event_id is not None:
+                headers["Last-Event-ID"] = last_event_id
+            terminal = False
+            try:
+                async with self._http.stream(
+                    "GET", f"/v1/runs/{run_id}/stream", headers=headers
+                ) as response:
+                    if response.status_code >= 400:
+                        body = await response.aread()
+                        detail = _extract_detail_from_bytes(body)
+                        raise errors.classify(response.status_code, detail)
+                    async for line in response.aiter_lines():
+                        for event in decoder.feed_line(line):
+                            emitted, last_seq, last_event_id = _accept_stream_event(
+                                event,
+                                last_seq=last_seq,
+                                last_event_id=last_event_id,
+                                seen_event_ids=seen_event_ids,
                             )
-                        if seq is not None:
-                            last_seq = seq if isinstance(seq, int) else last_seq
-                        yield event
-                for event in decoder.finish():
-                    yield event
-        except httpx.HTTPError as exc:
+                            for item in emitted:
+                                yield item
+                                terminal = terminal or item.event in terminal_events
+                    for event in decoder.finish():
+                        emitted, last_seq, last_event_id = _accept_stream_event(
+                            event,
+                            last_seq=last_seq,
+                            last_event_id=last_event_id,
+                            seen_event_ids=seen_event_ids,
+                        )
+                        for item in emitted:
+                            yield item
+                            terminal = terminal or item.event in terminal_events
+            except httpx.HTTPError as exc:
+                last_transport_error = exc
+            if terminal:
+                return
+            if attempt < 2:
+                continue
+
+        if last_transport_error is not None and last_seq is None:
+            exc = last_transport_error
             raise errors.TransportError(f"{exc.__class__.__name__}: {exc}") from exc
+        raise errors.StreamProtocolError(
+            "run stream ended before a terminal event after 3 reconnect attempts"
+        )
 
     # -- approvals ---------------------------------------------------------
 
@@ -249,6 +269,50 @@ class AsyncAPIClient:
 
     async def healthz(self) -> dict[str, Any]:
         return await self.request("GET", "/healthz")
+
+
+def _accept_stream_event(
+    event: ServerEvent,
+    *,
+    last_seq: int | None,
+    last_event_id: str | None,
+    seen_event_ids: set[str],
+) -> tuple[list[ServerEvent], int | None, str | None]:
+    """Deduplicate one SSE event and surface any canonical sequence gap."""
+    if event.malformed:
+        return [event], last_seq, last_event_id
+
+    event_id = event.id or event.data.get("event_id")
+    event_id = str(event_id) if event_id else None
+    if event_id is not None and event_id in seen_event_ids:
+        return [], last_seq, last_event_id
+
+    raw_seq = event.data.get("seq")
+    seq = raw_seq if isinstance(raw_seq, int) else None
+    if seq is not None and last_seq is not None and seq <= last_seq:
+        if event_id is not None:
+            seen_event_ids.add(event_id)
+        return [], last_seq, last_event_id
+
+    emitted: list[ServerEvent] = []
+    if seq is not None and last_seq is not None and seq > last_seq + 1:
+        emitted.append(
+            ServerEvent(
+                event="stream.gap",
+                data={
+                    "message": f"SSE gap detected: seq {last_seq} → {seq}",
+                    "from_seq": last_seq,
+                    "to_seq": seq,
+                },
+            )
+        )
+    emitted.append(event)
+    if event_id is not None:
+        seen_event_ids.add(event_id)
+        last_event_id = event_id
+    if seq is not None:
+        last_seq = seq
+    return emitted, last_seq, last_event_id
 
 
 def _extract_detail(response: httpx.Response) -> str:

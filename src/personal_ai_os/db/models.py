@@ -130,7 +130,7 @@ class Message(Base):
     __table_args__ = (
         # Durable transcript identity. PostgreSQL/SQLite both permit multiple
         # NULLs, so legacy/session-only messages remain unaffected.
-        UniqueConstraint("run_id", "run_seq", name="uq_message_run_seq"),
+        Index("uq_message_run_seq", "run_id", "run_seq", unique=True),
     )
 
     id: Mapped[uuid.UUID] = _uuid_pk()
@@ -192,7 +192,7 @@ class RunStep(Base):
 class ToolCall(Base):
     __tablename__ = "tool_calls"
     __table_args__ = (
-        UniqueConstraint("run_id", "idempotency_key", name="uq_toolcall_run_idem"),
+        Index("uq_toolcall_run_idem", "run_id", "idempotency_key", unique=True),
     )
 
     id: Mapped[uuid.UUID] = _uuid_pk()
@@ -334,7 +334,7 @@ class EventLog(Base):
 
     __tablename__ = "event_log"
     __table_args__ = (
-        UniqueConstraint("run_id", "seq", name="uq_event_log_run_seq"),
+        Index("uq_event_log_run_seq", "run_id", "seq", unique=True),
     )
 
     id: Mapped[uuid.UUID] = _uuid_pk()

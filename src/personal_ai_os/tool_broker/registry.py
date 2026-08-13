@@ -39,6 +39,15 @@ def _validate_capability_invariants(tool: ToolDescriptor) -> None:
       * credential-scoped tools must be R1+
     """
     risk = tool.risk_level or 0
+    if tool.source != "native" and tool.result_trust in {
+        "trusted_user",
+        "trusted_system",
+        "trusted_tool",
+    }:
+        raise ValueError(
+            f"capability invariant violated for {tool.name!r}: non-native source "
+            "cannot self-assign a trusted result label"
+        )
     if tool.destructive and risk < 4:
         raise ValueError(
             f"capability invariant violated for {tool.name!r}: destructive tool must be R4, got R{risk}"

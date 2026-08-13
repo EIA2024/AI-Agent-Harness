@@ -22,6 +22,7 @@ from personal_ai_os.cli.tui.command_registry import list_commands, lookup
 from personal_ai_os.cli.tui.controllers.chat import ChatController
 from personal_ai_os.cli.tui.keymap import BINDINGS as KEYMAP_BINDINGS
 from personal_ai_os.cli.tui.screens.approval import ApprovalScreen
+from personal_ai_os.cli.tui.screens.confirm import ConfirmScreen
 from personal_ai_os.cli.tui.screens.info import InfoScreen
 from personal_ai_os.cli.tui.widgets.composer import Composer
 from personal_ai_os.cli.tui.widgets.status_bar import StatusBar
@@ -91,6 +92,7 @@ class PersonalAIApp(App):
         self._owns_client = client is None
         self.controller: ChatController | None = None
         self._approval_open = False
+        self._pending_memory_forget: str | None = None
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=False)
@@ -105,6 +107,7 @@ class PersonalAIApp(App):
         self.controller = ChatController(
             self._client, self, session_id=self._session_id
         )
+        await self.controller.restore_session()
         self.refresh_ui()
         self.query_one("#composer", Composer).focus()
 
@@ -264,11 +267,41 @@ class PersonalAIApp(App):
             lines.append(f"Last error: {strip_control_sequences(state.last_error)}")
         self.push_screen(InfoScreen("Status", lines))
 
+    async def cmd_context(self, _args: str) -> None:
+        if self.controller is None or self._client is None:
+            return
+        run = None
+        if self.controller.state.run_id:
+            try:
+                run = await self._client.get_run(self.controller.state.run_id)
+            except Exception as exc:  # noqa: BLE001
+                self.notify(f"context error: {exc}", timeout=3)
+                return
+        self.push_screen(
+            InfoScreen("Context summary", context_summary_lines(self.controller.state, run))
+        )
+
     async def cmd_memory(self, args: str) -> None:
         if self._client is None:
             return
-        query = args.strip()
+        parts = args.strip().split(maxsplit=1)
         try:
+            if parts and parts[0].lower() == "show" and len(parts) == 2:
+                memory = await self._client.get_memory(parts[1])
+                self.push_screen(InfoScreen("Memory detail", memory_detail_lines(memory)))
+                return
+            if parts and parts[0].lower() == "forget" and len(parts) == 2:
+                memory = await self._client.get_memory(parts[1])
+                self._pending_memory_forget = memory.id
+                self.push_screen(
+                    ConfirmScreen(
+                        "Forget memory?",
+                        f"{memory.id[:8]} · {strip_control_sequences(memory.summary or memory.content[:100])}",
+                    ),
+                    callback=self._on_memory_forget_confirm,
+                )
+                return
+            query = args.strip()
             if query:
                 memories = await self._client.search_memories(query, limit=20)
             else:
@@ -276,10 +309,22 @@ class PersonalAIApp(App):
         except Exception as exc:  # noqa: BLE001
             self.notify(f"memory error: {exc}", timeout=3)
             return
-        lines = [f"[dim]{m.id[:8]} · {m.type} · {m.scope}[/] {strip_control_sequences(m.content[:120])}" for m in memories]
+        lines = [memory_summary_line(memory) for memory in memories]
         if not lines:
             lines = ["no memories"]
         self.push_screen(InfoScreen(f"Memory ({len(memories)})", lines))
+
+    async def _on_memory_forget_confirm(self, confirmed: bool) -> None:
+        memory_id = self._pending_memory_forget
+        self._pending_memory_forget = None
+        if not confirmed or not memory_id or self._client is None:
+            return
+        try:
+            await self._client.forget_memory(memory_id)
+        except Exception as exc:  # noqa: BLE001
+            self.notify(f"memory error: {exc}", timeout=3)
+            return
+        self.notify(f"Forgot memory {memory_id[:8]}", timeout=2)
 
     async def cmd_tools(self, _args: str) -> None:
         if self._client is None:
@@ -326,3 +371,49 @@ def create_app(
 ) -> PersonalAIApp:
     """App factory (used by tests and the plain fallback entry)."""
     return PersonalAIApp(client=client, session_id=session_id)
+
+
+def context_summary_lines(state, run) -> list[str]:  # noqa: ANN001
+    """Build a metadata-only context summary; never expose prompt contents."""
+    run_state = dict(getattr(run, "state", None) or {})
+    context_items = run_state.get("context_items") or []
+    messages = run_state.get("messages") or []
+    tool_results = run_state.get("tool_results") or []
+    summary_present = bool(run_state.get("conversation_summary"))
+    memory_count = sum(
+        1
+        for item in context_items
+        if isinstance(item, dict)
+        and str(item.get("type") or item.get("source") or "").lower().startswith("memory")
+    )
+    usage = dict(getattr(run, "model_usage", None) or {})
+    total_tokens = usage.get("total_tokens")
+    return [
+        f"Session             : {state.session_id or 'unknown'}",
+        f"Run                 : {state.run_id or 'unknown'}",
+        f"Conversation turns  : {len(messages) if messages else 'unknown'}",
+        f"Conversation summary: {'present' if summary_present else 'not reported'}",
+        f"Context sources      : {len(context_items) if context_items else 'not reported'}",
+        f"Memories used        : {memory_count if context_items else 'not reported'}",
+        f"Tool results         : {len(tool_results)}",
+        f"Model tokens         : {total_tokens if total_tokens is not None else 'unknown'}",
+    ]
+
+
+def memory_summary_line(memory) -> str:  # noqa: ANN001
+    source = f"{memory.source_type}:{memory.source_id or 'unknown'}"
+    content = strip_control_sequences(memory.summary or memory.content[:120])
+    return f"[dim]{memory.id[:8]} · {memory.type} · {memory.scope} · {source}[/] {content}"
+
+
+def memory_detail_lines(memory) -> list[str]:  # noqa: ANN001
+    return [
+        f"ID        : {memory.id}",
+        f"Type      : {memory.type}",
+        f"Scope     : {memory.scope}",
+        f"Source    : {memory.source_type}:{memory.source_id or 'unknown'}",
+        f"Sensitivity: {memory.sensitivity}",
+        f"Confidence: {memory.confidence}",
+        f"Summary   : {strip_control_sequences(memory.summary or 'not reported')}",
+        f"Content   : {strip_control_sequences(memory.content)}",
+    ]

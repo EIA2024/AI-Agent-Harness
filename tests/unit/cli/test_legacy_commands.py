@@ -199,3 +199,9 @@ def test_cmd_approve_without_id_exits_2(fake_api, capsys):
     with pytest.raises(SystemExit) as exc:
         legacy.cmd_approve(_args(list=False, approval_id=None))
     assert exc.value.code == 2
+
+
+def test_legacy_thinking_is_suppressed_even_when_requested(capsys):
+    secret_reasoning = "private chain of thought"
+    legacy._apply("thinking.delta", {"text": secret_reasoning}, show_thinking=True)
+    assert secret_reasoning not in capsys.readouterr().out

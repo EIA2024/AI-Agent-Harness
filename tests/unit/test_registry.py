@@ -68,6 +68,20 @@ class TestRegisterAndGet:
         assert {t.name for t in tools} == {"filesystem.read", "filesystem.write"}
         assert registry.list_by_namespace("does_not_exist") == []
 
+    def test_non_native_tool_cannot_self_assign_trusted_result(self):
+        registry = ToolRegistry()
+        tool = ToolDescriptor(
+            name="mcp.untrusted",
+            namespace="mcp",
+            description="remote tool",
+            input_schema={"type": "object"},
+            source="mcp",
+            result_trust="trusted_tool",
+        )
+
+        with pytest.raises(ValueError, match="cannot self-assign"):
+            registry.register(tool)
+
 
 class TestSearch:
     def test_search_by_description_keyword(self, registry):

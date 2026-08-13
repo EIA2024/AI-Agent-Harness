@@ -8,13 +8,37 @@ import asyncio
 import os
 
 from alembic import context
+from sqlalchemy import Numeric, Uuid
 from sqlalchemy.ext.asyncio import create_async_engine
 
-from src.personal_ai_os.db.models import Base
+from personal_ai_os.db.models import Base
 
 config = context.config
 
 DATABASE_URL = os.getenv("DATABASE_URL", config.get_main_option("sqlalchemy.url"))
+
+
+def _compare_type(
+    migration_context,
+    inspected_column,
+    metadata_column,
+    inspected_type,
+    metadata_type,
+) -> bool | None:
+    """Ignore SQLite's lossy reflection of native UUID declarations.
+
+    SQLite assigns unknown ``UUID`` declarations NUMERIC affinity, so Alembic
+    otherwise proposes a destructive NUMERIC-to-UUID change for every key.
+    PostgreSQL and all other real type differences retain Alembic's defaults.
+    """
+    del inspected_column, metadata_column
+    if (
+        migration_context.dialect.name == "sqlite"
+        and isinstance(inspected_type, Numeric)
+        and isinstance(metadata_type, Uuid)
+    ):
+        return False
+    return None
 
 
 def run_migrations_offline() -> None:
@@ -29,7 +53,11 @@ def run_migrations_offline() -> None:
 
 
 def do_run_migrations(connection) -> None:
-    context.configure(connection=connection, target_metadata=Base.metadata)
+    context.configure(
+        connection=connection,
+        target_metadata=Base.metadata,
+        compare_type=_compare_type,
+    )
     with context.begin_transaction():
         context.run_migrations()
 

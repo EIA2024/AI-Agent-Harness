@@ -114,7 +114,8 @@ async def resume_run(
         raise HTTPException(status_code=503, detail="Agent runner is not wired up")
 
     try:
-        result = await runner.resume(
+        resume_method = getattr(runner, "resume_streaming", runner.resume)
+        result = await resume_method(
             run_id=run_id,
             approval_id=body.approval_id,
             decision=_normalize_approval_decision(body.decision),

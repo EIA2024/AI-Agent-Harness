@@ -8,6 +8,8 @@ the terminal sanitizer (T52).
 
 from __future__ import annotations
 
+from rich.cells import set_cell_size
+
 from personal_ai_os.cli.domain.state import AppState, TranscriptCell
 from personal_ai_os.cli.sanitize import strip_control_sequences
 
@@ -24,14 +26,15 @@ def status_glyph(run_status: str) -> str:
     return _STATUS_GLYPHS.get(run_status, "?")
 
 
-def status_bar_text(state: AppState) -> str:
+def status_bar_text(state: AppState, *, width: int | None = None) -> str:
     """Single-line status: session · run · state · connection."""
     session = (state.session_id or "-")[:8]
     run = (state.run_id or "-")[:8]
-    return (
+    rendered = (
         f"session {session} · run {run} · {state.run_status} · "
         f"{state.connection_state.value}"
     )
+    return set_cell_size(rendered, width) if width is not None else rendered
 
 
 def cell_lines(cell: TranscriptCell) -> list[str]:

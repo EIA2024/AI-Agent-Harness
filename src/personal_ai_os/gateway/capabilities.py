@@ -55,7 +55,13 @@ class CapabilityService:
         return out
 
     def can_use(self, owner_id: Any, tool_name: str) -> bool:
-        return tool_name not in self.owner_deny.get(str(owner_id), set())
+        if tool_name in self.owner_deny.get(str(owner_id), set()):
+            return False
+        getter = getattr(self.tool_registry, "get", None)
+        tool = getter(tool_name) if getter is not None else None
+        if tool is None:
+            return False
+        return (getattr(tool, "risk_level", 0) or 0) <= self.risk_ceiling
 
     def _matches(self, query: str, tool: Any, name: str) -> bool:
         q = query.lower()

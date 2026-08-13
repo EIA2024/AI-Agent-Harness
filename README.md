@@ -17,7 +17,7 @@ Python · FastAPI · LangGraph · SQLAlchemy · PostgreSQL / SQLite
 - **🧠 上下文工程** — 4 层 Prompt 组装 + token 预算 + **MemGPT 风格对话压缩**（近期完整 + 历史摘要），"在当前 context 能力下尽量保留对话记忆"。
 - **📦 模型无关** — Anthropic + OpenAI 兼容（OpenAI / DeepSeek / Moonshot / GLM / Qwen / Ollama），多套本地 Provider 配置一键切换，failover，成本记录。
 - **🔌 工具系统** — 单一 ToolBroker 执行路径；内置 calculator（安全求值）、filesystem（路径隔离）、http_fetch（SSRF 防护 + HTML→文本）。
-- **🖥️ 终端体验** — CLI 流式打字机输出、思维链灰显、工具调用实时宣布（参考 Codex / Kimi / GLM 风格）。
+- **🖥️ 终端体验** — CLI 流式打字机输出、进度提示、工具调用实时宣布；模型私有推理不会写入持久层或终端。
 
 ## 📚 文档
 
@@ -39,15 +39,17 @@ uv sync --extra dev
 # 2. 配置 LLM Provider（OpenAI/Anthropic/DeepSeek/...，支持多套切换）
 uv run python -m apps.cli.main config init
 #    → 交互式向导：请求格式（OpenAI 兼容 / Anthropic）→ Base URL → API Key → 模型
-#    → 配置保存在 ~/.personal_ai/profiles.json（仓库外，密钥不进 git）
+#    → 元数据保存在 ~/.personal_ai/profiles.json，API Key 存入系统 keyring
 
 # 3. 启动 API（默认本地 SQLite）
+export PERSONAL_AI_DEV_API_KEY=replace-with-a-local-secret
+export PERSONAL_AI_KEY_HASH_SECRET=replace-with-another-long-random-secret
 uv run python -m apps.api.main
 # → http://localhost:8000   （交互式文档 /docs）
 
 # 4. 另开终端，用 CLI 对话
 export PERSONAL_AI_API_URL=http://localhost:8000
-export PERSONAL_AI_API_KEY=dev-key
+export PERSONAL_AI_API_KEY=replace-with-a-local-secret
 uv run python -m apps.cli.main chat
 ```
 
@@ -69,10 +71,13 @@ uv run python -m apps.cli.main config remove <name> # 删除
 | 变量 | 必需 | 说明 |
 |---|---|---|
 | `ANTHROPIC_API_KEY` | 否（用 `config init` 更佳） | Anthropic 密钥（legacy 回退） |
-| `PERSONAL_AI_DEV_API_KEY` | 服务器访问 | 开发模式访问密钥，客户端 `X-API-Key` 匹配 |
+| `PERSONAL_AI_DEV_API_KEY` | 开发服务器访问 | 显式启用本地开发用户；客户端 `X-API-Key` 必须匹配 |
+| `PERSONAL_AI_KEY_HASH_SECRET` | 生产必需 | API Key 的 HMAC 哈希密钥；应使用独立随机值 |
 | `DATABASE_URL` | 否 | PostgreSQL URL；缺省用本地 SQLite（`data/app.db`） |
 | `PERSONAL_AI_CONFIG_DIR` | 否 | Provider 配置目录（默认 `~/.personal_ai`） |
-| `PERSONAL_AI_API_URL` / `PERSONAL_AI_API_KEY` | CLI | 默认已匹配本地，通常不用设 |
+| `PERSONAL_AI_API_URL` / `PERSONAL_AI_API_KEY` | CLI | API 地址及访问密钥；密钥需与服务器配置匹配 |
+| `PERSONAL_AI_WORKSPACE_ROOT` | 生产必需 | filesystem 连接器允许访问的唯一根目录 |
+| `PERSONAL_AI_HTTP_ALLOWED_DOMAINS` | 生产必需 | http_fetch 允许访问的逗号分隔域名白名单 |
 
 ## 记忆与 Provider 切换
 
@@ -84,7 +89,7 @@ uv run python -m apps.cli.main config remove <name> # 删除
 
 ```bash
 docker compose -f deploy/compose/docker-compose.yml up
-# api:8000 + postgres(pgvector):5432
+# API 仅绑定宿主机 127.0.0.1；Postgres 只在容器内部网络暴露
 ```
 
 ## 运行测试

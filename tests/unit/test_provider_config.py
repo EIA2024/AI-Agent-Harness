@@ -19,8 +19,26 @@ from personal_ai_os.model_gateway import (
 # ---------------------------------------------------------------------------
 
 
+class _MemoryVault:
+    def __init__(self):
+        self.values: dict[str, str] = {}
+
+    def set(self, name: str, key: str) -> bool:
+        self.values[name] = key
+        return True
+
+    def get(self, name: str) -> str | None:
+        return self.values.get(name)
+
+    def delete(self, name: str) -> bool:
+        self.values.pop(name, None)
+        return True
+
+
 def _make_store(tmp_path):
-    return ProviderConfigStore(path=tmp_path / "nested" / "profiles.json")
+    return ProviderConfigStore(
+        path=tmp_path / "nested" / "profiles.json", vault=_MemoryVault()
+    )
 
 
 def test_add_and_get_active(tmp_path):
@@ -63,6 +81,45 @@ def test_masked_key_never_leaks(tmp_path):
     masked = store.get("s").masked_key()
     assert "sk-abcdefghijklmnopqrstuvwxyz1234" not in masked
     assert masked.startswith("sk-a") and masked.endswith("1234")
+
+
+def test_profile_file_contains_reference_not_plaintext_secret(tmp_path):
+    store = _make_store(tmp_path)
+    secret = "sk-plaintext-must-not-survive"
+    store.add(ProviderProfile(name="secure", format="openai", api_key=secret))
+
+    raw = store.path.read_text(encoding="utf-8")
+    payload = json.loads(raw)
+    assert secret not in raw
+    assert payload["profiles"]["secure"]["secret_ref"] == "secure"
+    assert store.get("secure").api_key == secret
+
+
+def test_legacy_plaintext_profile_migrates_only_after_vault_write(tmp_path):
+    path = tmp_path / "profiles.json"
+    secret = "sk-legacy-secret"
+    path.write_text(
+        json.dumps(
+            {
+                "active": "legacy",
+                "profiles": {
+                    "legacy": {
+                        "name": "legacy",
+                        "format": "openai",
+                        "api_key": secret,
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    vault = _MemoryVault()
+    store = ProviderConfigStore(path=path, vault=vault)
+
+    assert store.get_active().api_key == secret
+    migrated = path.read_text(encoding="utf-8")
+    assert secret not in migrated
+    assert json.loads(migrated)["profiles"]["legacy"]["secret_ref"] == "legacy"
 
 
 def test_invalid_format_rejected():
@@ -323,7 +380,7 @@ def test_base_url_requires_https_for_remote(tmp_path, monkeypatch):
     from personal_ai_os.model_gateway import ProviderConfigStore
 
     monkeypatch.setenv("PERSONAL_AI_CONFIG_DIR", str(tmp_path))
-    store = ProviderConfigStore()
+    store = ProviderConfigStore(vault=_MemoryVault())
     with pytest.raises(ValueError, match="https"):
         store.add(ProviderProfile(name="plain", format="openai", api_key="k",
                                   base_url="http://api.example.com/v1"))

@@ -309,9 +309,24 @@ class ToolBroker:
             )
 
         if needs_claim:
-            claimed = await self._claim_execution(
-                tool, context, arguments, decision.risk_level
-            )
+            try:
+                claimed = await self._claim_execution(
+                    tool, context, arguments, decision.risk_level
+                )
+            except Exception:  # noqa: BLE001 - side effects fail closed on DB gaps
+                logger.warning(
+                    "Could not persist execution claim for %s", tool.name, exc_info=True
+                )
+                return await self._finish_failure(
+                    tool,
+                    context,
+                    started,
+                    err_code=ERR_DENIED,
+                    message="Blocked: could not persist side-effect execution claim",
+                    event=EventTypes.TOOL_DENIED,
+                    risk_level=decision.risk_level,
+                    arguments=arguments,
+                )
             if isinstance(claimed, ToolResult):
                 return claimed
 

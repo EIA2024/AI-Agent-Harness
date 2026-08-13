@@ -23,7 +23,7 @@ from sqlalchemy.exc import IntegrityError
 
 from personal_ai_os.agent_runtime.streams import push as push_live
 from personal_ai_os.common.models import AgentOSError, DomainEvent, ErrorCode, EventTypes
-from personal_ai_os.common.utils import approximate_tokens
+from personal_ai_os.common.utils import LogSanitizer, approximate_tokens
 from personal_ai_os.context_engine.summarizer import ConversationSummarizer
 from personal_ai_os.db.models import Approval, Message, Run, RunStep, Session, ToolCall
 from personal_ai_os.db.session import session_scope
@@ -426,13 +426,22 @@ class RunRunner:
         self._bg_tasks[str(run_id)] = task
         return {"id": str(run_id), "run_id": str(run_id), "status": "running"}
 
-    async def _run_background(self, run_id: uuid.UUID, initial: dict, config: dict) -> None:
-        from personal_ai_os.agent_runtime import event_log, streams
+    async def _run_background(
+        self,
+        run_id: uuid.UUID,
+        initial: dict,
+        config: dict,
+        *,
+        resume_value: dict | None = None,
+    ) -> None:
+        from personal_ai_os.agent_runtime import streams
 
         terminal = "run.completed"
         approval_info: dict | None = None
         try:
-            interrupt_payload = await self._stream(run_id, initial, config)
+            interrupt_payload = await self._stream(
+                run_id, initial, config, resume_value=resume_value
+            )
             if interrupt_payload is not None:
                 approval_info = await self._handle_approval_interrupt(run_id, interrupt_payload)
                 terminal = "approval.required"
@@ -470,7 +479,7 @@ class RunRunner:
             if approval_info is not None:
                 payload.update(approval_info)
             push_live(run_id, terminal, payload)
-            await event_log.append_run_event(run_id, terminal, payload)
+            await streams.flush_persistence(run_id)
             streams.unregister(run_id)
             self._bg_tasks.pop(str(run_id), None)
 
@@ -484,6 +493,71 @@ class RunRunner:
         decision: str | None = None,
         edited_arguments: dict | None = None,
     ) -> dict:
+        run_uuid, state, config, resume_value = await self._prepare_resume(
+            run_id,
+            approval_id=approval_id,
+            decision=decision,
+            edited_arguments=edited_arguments,
+        )
+        try:
+            interrupt_payload = await self._stream(
+                run_uuid, state, config, resume_value=resume_value
+            )
+            if interrupt_payload is not None:
+                await self._handle_approval_interrupt(run_uuid, interrupt_payload)
+            elif await self._finalize(run_uuid, success=True):
+                await self._compact_session_memory(run_uuid)
+            return await self.get_run(run_uuid)
+        except (RunExecutionCancelled, RunLeaseLostError):
+            return await self.get_run(run_uuid)
+        except Exception as exc:
+            await self._fail(run_uuid, exc)
+            raise
+
+    async def resume_streaming(
+        self,
+        run_id,
+        *,
+        approval_id=None,
+        decision: str | None = None,
+        edited_arguments: dict | None = None,
+    ) -> dict:
+        """Claim a paused run, return immediately, and stream its continuation."""
+        run_uuid, state, config, resume_value = await self._prepare_resume(
+            run_id,
+            approval_id=approval_id,
+            decision=decision,
+            edited_arguments=edited_arguments,
+        )
+        from personal_ai_os.agent_runtime import event_log, streams
+
+        initial_seq = await event_log.last_run_event_seq(run_uuid)
+        streams.register(run_uuid, initial_seq=initial_seq)
+        push_live(
+            run_uuid,
+            "run.started",
+            {"run_id": str(run_uuid), "status": "running", "resumed": True},
+        )
+        task = asyncio.create_task(
+            self._run_background(
+                run_uuid,
+                state,
+                config,
+                resume_value=resume_value,
+            )
+        )
+        self._bg_tasks[str(run_uuid)] = task
+        return await self.get_run(run_uuid)
+
+    async def _prepare_resume(
+        self,
+        run_id,
+        *,
+        approval_id=None,
+        decision: str | None = None,
+        edited_arguments: dict | None = None,
+    ) -> tuple[uuid.UUID, dict, dict, dict]:
+        """Atomically resolve approval + claim the execution lease."""
         run_uuid = _coerce_uuid(run_id)
         run_row = await self._get_run_row(run_uuid)
         if run_row is None:
@@ -530,20 +604,7 @@ class RunRunner:
             )
 
         config = {"configurable": {"thread_id": str(run_uuid)}}
-        try:
-            interrupt_payload = await self._stream(
-                run_uuid, state, config, resume_value=resume_value
-            )
-            if interrupt_payload is not None:
-                await self._handle_approval_interrupt(run_uuid, interrupt_payload)
-            elif await self._finalize(run_uuid, success=True):
-                await self._compact_session_memory(run_uuid)
-            return await self.get_run(run_uuid)
-        except (RunExecutionCancelled, RunLeaseLostError):
-            return await self.get_run(run_uuid)
-        except Exception as exc:
-            await self._fail(run_uuid, exc)
-            raise
+        return run_uuid, state, config, resume_value
 
     # ---------------------------------------------------------------- cancel
 
@@ -587,11 +648,11 @@ class RunRunner:
                     payload={"reason": "cancelled_by_user"},
                 )
             )
-        from personal_ai_os.agent_runtime import event_log, streams
+        from personal_ai_os.agent_runtime import streams
 
         payload = {"run_id": str(run_uuid), "status": "cancelled"}
         push_live(run_uuid, "run.cancelled", payload)
-        await event_log.append_run_event(run_uuid, "run.cancelled", payload)
+        await streams.flush_persistence(run_uuid)
         task = self._bg_tasks.pop(str(run_uuid), None)
         if task is not None and not task.done():
             task.cancel()
@@ -820,6 +881,11 @@ class RunRunner:
                 return None
             state = dict(run.state or {})
             pending_tool_call = state.get("pending_tool_call") or {}
+            tool_call_id = (
+                pending_tool_call.get("id")
+                if isinstance(pending_tool_call, dict)
+                else None
+            )
             function = (
                 pending_tool_call.get("function")
                 if isinstance(pending_tool_call, dict)
@@ -837,6 +903,7 @@ class RunRunner:
                         arguments = json.loads(raw_args or "{}")
                     except Exception:
                         arguments = {}
+            arguments_preview = LogSanitizer.sanitize_dict(arguments)
 
             existing = await session.get(Approval, approval_uuid)
             if existing is None:
@@ -868,7 +935,9 @@ class RunRunner:
             state["status"] = "waiting_approval"
             state["pending_approval"] = {
                 "approval_id": str(approval_uuid),
+                "tool_call_id": tool_call_id,
                 "tool_name": tool_name,
+                "arguments_preview": arguments_preview,
                 "risk_level": risk_level,
                 "reason": reason,
                 "requires_auth_method": requires_auth_method,
@@ -889,7 +958,9 @@ class RunRunner:
                     session_id=session_id,
                     payload={
                         "approval_id": str(approval_uuid),
+                        "tool_call_id": tool_call_id,
                         "tool_name": tool_name,
+                        "arguments_preview": arguments_preview,
                         "risk_level": risk_level,
                         "reason": reason,
                         "requires_auth_method": requires_auth_method,
@@ -898,7 +969,9 @@ class RunRunner:
             )
         return {
             "approval_id": str(approval_uuid),
+            "tool_call_id": tool_call_id,
             "tool_name": tool_name,
+            "arguments_preview": arguments_preview,
             "risk_level": risk_level,
             "action_summary": f"执行工具 {tool_name}",
             "requires_auth_method": requires_auth_method,

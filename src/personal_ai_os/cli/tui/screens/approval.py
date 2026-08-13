@@ -72,12 +72,19 @@ class ApprovalScreen(ModalScreen[tuple[str, dict[str, Any] | None]]):
     def choose_edit(self) -> None:
         raw = self.query_one("#edit-input", Input).value.strip()
         if not raw:
-            self.dismiss(("edit", {}))
+            self.query_one("#edit-hint", Static).update(
+                "[error]enter a JSON object before choosing Edit[/]"
+            )
             return
         try:
             parsed = json.loads(raw)
         except json.JSONDecodeError:
             self.query_one("#edit-hint", Static).update("[error]invalid JSON — fix and press Edit again[/]")
+            return
+        if not isinstance(parsed, dict):
+            self.query_one("#edit-hint", Static).update(
+                "[error]edited arguments must be a JSON object[/]"
+            )
             return
         self.dismiss(("edit", parsed))
 

@@ -29,6 +29,7 @@ import sys
 
 import httpx
 
+from personal_ai_os.cli.api import errors as api_errors
 from personal_ai_os.model_gateway import KNOWN_PROVIDERS, ProviderConfigStore, ProviderProfile
 
 API_URL = os.environ.get("PERSONAL_AI_API_URL", "http://localhost:8000")
@@ -48,15 +49,24 @@ class APIClient:
 
     def request(self, method: str, path: str, **kwargs) -> dict:
         kwargs.setdefault("headers", {"X-API-Key": self.api_key})
-        response = self._http.request(method, f"{self.base_url}{path}", **kwargs)
+        try:
+            response = self._http.request(method, f"{self.base_url}{path}", **kwargs)
+        except httpx.HTTPError as exc:
+            raise api_errors.TransportError(
+                f"{exc.__class__.__name__}: {exc}"
+            ) from exc
         if response.status_code >= 400:
             try:
                 detail = response.json().get("detail", response.text)
             except Exception:  # noqa: BLE001
                 detail = response.text
-            print(f"Error {response.status_code}: {detail}", file=sys.stderr)
-            raise SystemExit(1)
-        return response.json()
+            raise api_errors.classify(response.status_code, str(detail))
+        try:
+            return response.json()
+        except json.JSONDecodeError:
+            raise api_errors.StreamProtocolError(
+                f"server returned a non-JSON response ({response.status_code})"
+            ) from None
 
     def get(self, path: str, **kwargs) -> dict:
         return self.request("GET", path, **kwargs)
@@ -91,11 +101,6 @@ def _print_reply(client: APIClient, run_id: str) -> None:
         return
     err = run.get("error") or {}
     print(f"  ⚠  Run {status}: {err.get('message') or err.get('code') or ''}".rstrip())
-
-
-# ANSI: dim/gray for the chain of thought, reset after.
-_DIM = "\033[90m"
-_RESET = "\033[0m"
 
 
 def _stream_run(client: APIClient, run_id: str, *, show_thinking: bool = True) -> None:
@@ -153,9 +158,8 @@ def _stream_run(client: APIClient, run_id: str, *, show_thinking: bool = True) -
 def _apply(event: str, payload: dict, show_thinking: bool) -> bool:
     """Render one SSE event; returns True for text/thinking deltas."""
     if event == "thinking.delta":
-        if show_thinking:
-            sys.stdout.write(f"{_DIM}{payload.get('text', '')}{_RESET}")
-            sys.stdout.flush()
+        # Raw model reasoning is never a public CLI output.  Keep accepting the
+        # legacy event so old servers remain compatible, but discard its text.
         return True
     if event == "text.delta":
         sys.stdout.write(payload.get("text", ""))
@@ -231,7 +235,7 @@ def cmd_runs(args: argparse.Namespace) -> None:
                 continue
             try:
                 runs.append(client.get(f"/v1/runs/{run_id}"))
-            except SystemExit:
+            except api_errors.CLIError:
                 continue
             if len(runs) >= args.limit:
                 break
@@ -517,8 +521,12 @@ def main(argv: list[str] | None = None) -> int:
     if not hasattr(args, "func"):
         parser.print_help()
         return 0
-    args.func(args)
-    return 0
+    try:
+        args.func(args)
+        return 0
+    except api_errors.CLIError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":

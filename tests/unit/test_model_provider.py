@@ -260,9 +260,13 @@ async def test_anthropic_message_conversion_helpers():
     assert converted[2]["content"][0]["tool_use_id"] == "tc1"
 
 
-def _req(tools: list[dict]) -> ModelRequest:
-    from personal_ai_os.common.models import ModelRequest
+def test_unknown_model_price_is_reported_as_unknown():
+    from personal_ai_os.model_gateway.provider import estimate_cost_usd
 
+    assert estimate_cost_usd("unpriced-model", 100, 0, 50) is None
+
+
+def _req(tools: list[dict]) -> ModelRequest:
     return ModelRequest(
         purpose="assistant",
         messages=[{"role": "user", "content": "x"}],

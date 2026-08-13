@@ -441,9 +441,10 @@ async def test_tool_call_recorded_to_db():
             assert row.status == "success"
             assert row.risk_level == 1
             assert row.idempotency_key == "ik-rec-1"
-            # recorded arguments are sanitized — the secret is gone
+            # Credentials travel through the in-memory execution context and
+            # never enter the persisted argument map.
             assert row.arguments["message"] == "hi"
-            assert row.arguments["api_key"] == "[REDACTED]"
+            assert "api_key" not in row.arguments
             assert SECRET not in repr(row.arguments)
     finally:
         await dispose_engine()
@@ -570,6 +571,27 @@ async def test_capability_service_filters_owner_visibility():
     assert not caps.can_use("owner-b", "secret.get")
 
 
+async def test_capability_risk_ceiling_is_enforced_at_execution():
+    from personal_ai_os.gateway.capabilities import CapabilityService
+    from personal_ai_os.tool_broker import ToolBroker
+    from tests.unit.test_registry import make_tool
+
+    registry = ToolRegistry()
+    registry.register(make_tool("danger.run", "danger", risk_level=3))
+    caps = CapabilityService(registry, risk_ceiling=1)
+    broker = ToolBroker(
+        registry=registry,
+        policy_engine=FakePolicy(),
+        credential_broker=FakeCredential(),
+        capabilities=caps,
+    )
+
+    assert not caps.can_use("owner-a", "danger.run")
+    result = await broker.execute("danger.run", {}, ctx(owner_id="owner-a"))
+    assert result.success is False
+    assert result.error_code == "CAPABILITY_DENIED"
+
+
 
 
 async def test_result_data_size_is_bounded():
@@ -602,17 +624,22 @@ async def test_r3_execution_writes_durable_intent():
     """P1-033 — an R3 tool persists a durable intent before executing."""
     from sqlalchemy import select
 
-    from personal_ai_os.db.models import AuditEvent, User
+    from personal_ai_os.db.models import AuditEvent, Run, User
     from personal_ai_os.db.session import session_scope
 
     owner_id = uuid4()
     async with session_scope() as s:
         s.add(User(username=f"r3{uuid4().hex[:6]}", api_key=f"k{uuid4().hex[:8]}", id=owner_id))
         await s.flush()
+        run_id = uuid4()
+        s.add(Run(id=run_id, owner_id=owner_id, status="running", input={}))
+        await s.flush()
     connector = R3Connector()
     broker, registry, _ = make_broker(connector=connector)
     await broker.register_connector(connector)
-    result = await broker.execute("mail.send", {"message": "hi"}, ctx(owner_id=owner_id))
+    result = await broker.execute(
+        "mail.send", {"message": "hi"}, ctx(owner_id=owner_id, run_id=run_id)
+    )
     assert result.success
     assert connector.executed  # the connector ran
     async with session_scope() as s:
@@ -629,8 +656,12 @@ async def test_r3_intent_failure_fails_closed(monkeypatch):
     broker, registry, _ = make_broker(connector=connector)
     await broker.register_connector(connector)
 
+    from contextlib import asynccontextmanager
+
+    @asynccontextmanager
     async def _boom(*a, **k):
         raise RuntimeError("db down")
+        yield
 
     monkeypatch.setattr("personal_ai_os.db.session.session_scope", _boom)
     result = await broker.execute("mail.send", {"message": "hi"}, ctx())

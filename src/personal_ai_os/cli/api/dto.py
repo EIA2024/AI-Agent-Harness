@@ -164,6 +164,7 @@ class MemoryDTO:
     importance: float = 0.5
     confidence: float = 0.5
     source_type: str = "manual"
+    source_id: str | None = None
     sensitivity: str = "personal"
     status: str = "active"
     created_at: str | None = None
@@ -180,6 +181,7 @@ class MemoryDTO:
             importance=_d(data, "importance") or 0.5,
             confidence=_d(data, "confidence") or 0.5,
             source_type=_d(data, "source_type") or "manual",
+            source_id=_d(data, "source_id"),
             sensitivity=_d(data, "sensitivity") or "personal",
             status=_d(data, "status") or "active",
             created_at=_d(data, "created_at"),

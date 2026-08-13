@@ -129,6 +129,26 @@ class TestNormalFetch:
         assert result.success is False
         assert result.error_code == "HTTP_ERROR"
 
+    @pytest.mark.asyncio
+    async def test_model_arguments_cannot_smuggle_credentials(self):
+        connector = HttpFetchConnector(transport=mock_transport(ok_handler))
+        header_result = await connector.execute(
+            "http_fetch.fetch",
+            {
+                "url": "https://example.com/x",
+                "headers": {"Authorization": "Bearer secret"},
+            },
+            ctx(),
+        )
+        url_result = await connector.execute(
+            "http_fetch.fetch",
+            {"url": "https://user:password@example.com/x"},
+            ctx(),
+        )
+
+        assert header_result.error_code == "HTTP_CREDENTIALS_NOT_ALLOWED"
+        assert url_result.error_code == "HTTP_CREDENTIALS_NOT_ALLOWED"
+
 
 class TestTimeout:
     @pytest.mark.asyncio
@@ -269,3 +289,19 @@ def test_mixed_private_public_resolution_is_rebinding_signal(monkeypatch):
 
     monkeypatch.setattr("socket.getaddrinfo", only_private)
     assert _resolves_to_mixed_private_public("rebind.example") is False  # covered by _resolve_private
+
+
+def test_validated_dns_answer_is_pinned_into_request_url(monkeypatch):
+    """The eventual socket target is the exact public IP that was validated."""
+    from connectors.http_fetch.connector import _pinned_request_url, _resolve_addresses
+
+    def public(host, port=None, *args, **kwargs):
+        return [(2, 1, 6, "", ("93.184.216.34", 0))]
+
+    monkeypatch.setattr("socket.getaddrinfo", public)
+    addresses = _resolve_addresses("safe.example")
+
+    assert addresses == ["93.184.216.34"]
+    assert _pinned_request_url(
+        "https://safe.example:8443/path?q=1", addresses[0]
+    ) == "https://93.184.216.34:8443/path?q=1"

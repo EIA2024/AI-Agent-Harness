@@ -195,6 +195,9 @@ async def test_stream_gap_detected():
             "event: text.delta\n"
             'data: {"text": "hi", "seq": 4}\n'  # jumped from 1 → 4
             "\n"
+            "event: run.completed\n"
+            'data: {"run_id": "r1", "status": "completed", "seq": 5}\n'
+            "\n"
         )
         return httpx.Response(200, text=body)
 
@@ -203,3 +206,39 @@ async def test_stream_gap_detected():
     assert any(e.event == "stream.gap" for e in events), events
     gap = next(e for e in events if e.event == "stream.gap")
     assert gap.data["from_seq"] == 1 and gap.data["to_seq"] == 4
+
+
+async def test_stream_reconnects_with_last_event_id_and_deduplicates():
+    calls: list[str | None] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.headers.get("last-event-id"))
+        if len(calls) == 1:
+            body = (
+                "id: r1:1\n"
+                "event: run.started\n"
+                'data: {"run_id": "r1", "event_id": "r1:1", "seq": 1}\n\n'
+            )
+        else:
+            body = (
+                "id: r1:1\n"
+                "event: run.started\n"
+                'data: {"run_id": "r1", "event_id": "r1:1", "seq": 1}\n\n'
+                "id: r1:2\n"
+                "event: text.delta\n"
+                'data: {"text": "done", "event_id": "r1:2", "seq": 2}\n\n'
+                "id: r1:3\n"
+                "event: run.completed\n"
+                'data: {"run_id": "r1", "event_id": "r1:3", "seq": 3}\n\n'
+            )
+        return httpx.Response(200, text=body)
+
+    client = _make_client(handler)
+    events = [event async for event in client.stream_run("r1")]
+
+    assert calls == [None, "r1:1"]
+    assert [event.event for event in events] == [
+        "run.started",
+        "text.delta",
+        "run.completed",
+    ]

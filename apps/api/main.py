@@ -10,9 +10,11 @@ from __future__ import annotations
 import os
 import sys
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from personal_ai_os.db import session as db_session
 from personal_ai_os.gateway.services import (
@@ -53,8 +55,38 @@ async def ensure_database() -> None:
         os.makedirs(data_dir, exist_ok=True)
         db_path = os.path.join(data_dir, config.DB_FILE)
         db_session.configure(f"sqlite+aiosqlite:///{db_path}")
-    # create_all is idempotent and doubles as a dev convenience.
-    await db_session.init_db()
+    if app_env == "production":
+        await _validate_schema_revision()
+    else:
+        # create_all is a development convenience only. Production deploys
+        # migrate before startup and must already be at the Alembic head.
+        await db_session.init_db()
+
+
+async def _validate_schema_revision() -> None:
+    """Fail production startup when the database is not at Alembic head."""
+    from alembic.config import Config
+    from alembic.runtime.migration import MigrationContext
+    from alembic.script import ScriptDirectory
+
+    root = Path(__file__).resolve().parents[2]
+    config = Config(str(root / "alembic.ini"))
+    config.set_main_option("script_location", str(root / "migrations"))
+    expected = set(ScriptDirectory.from_config(config).get_heads())
+
+    async with db_session.get_engine().connect() as connection:
+        current = set(
+            await connection.run_sync(
+                lambda sync_connection: MigrationContext.configure(
+                    sync_connection
+                ).get_current_heads()
+            )
+        )
+    if current != expected:
+        raise RuntimeError(
+            "database schema is not at Alembic head "
+            f"(current={sorted(current)}, expected={sorted(expected)})"
+        )
 
 
 @asynccontextmanager
@@ -64,7 +96,12 @@ async def lifespan(app: FastAPI):
     await ensure_dev_owner()
     # Async wiring: register connector tools, build the graph + runner.
     await complete_wiring(app.state.services)
-    yield
+    try:
+        yield
+    finally:
+        from personal_ai_os.gateway.services import close_checkpointers
+
+        await close_checkpointers()
 
 
 # Weak dev values that must never reach production (P0-006).
@@ -103,7 +140,7 @@ def healthz() -> dict:
     return {"status": "ok", "service": "personal-ai-os-api"}
 
 
-async def readyz(request: Request) -> dict:
+async def readyz(request: Request):  # noqa: ANN201
     """Readiness: the process can actually serve — DB, runner, registry, auth."""
     import logging
 
@@ -126,7 +163,55 @@ async def readyz(request: Request) -> dict:
     checks["tool_registry"] = container.tool_registry is not None
     checks["model_provider"] = container.model_provider is not None
     ready = all(checks.values())
-    return {"status": "ready" if ready else "not_ready", "checks": checks}
+    payload = {"status": "ready" if ready else "not_ready", "checks": checks}
+    return payload if ready else JSONResponse(status_code=503, content=payload)
+
+
+class _BodyLimitMiddleware:
+    """Count actual ASGI body bytes, including chunked requests."""
+
+    def __init__(self, app, *, max_bytes: int):  # noqa: ANN001
+        self.app = app
+        self.max_bytes = max_bytes
+
+    async def __call__(self, scope, receive, send):  # noqa: ANN001
+        if scope.get("type") != "http":
+            await self.app(scope, receive, send)
+            return
+
+        headers = {key.lower(): value for key, value in scope.get("headers", [])}
+        raw_length = headers.get(b"content-length", b"").decode("ascii", "ignore")
+        if raw_length.isdigit() and int(raw_length) > self.max_bytes:
+            await JSONResponse(
+                status_code=413, content={"detail": "request body too large"}
+            )(scope, receive, send)
+            return
+
+        received = 0
+        messages: list[dict] = []
+        while True:
+            message = await receive()
+            messages.append(message)
+            if message.get("type") != "http.request":
+                break
+            received += len(message.get("body", b""))
+            if received > self.max_bytes:
+                await JSONResponse(
+                    status_code=413, content={"detail": "request body too large"}
+                )(scope, receive, send)
+                return
+            if not message.get("more_body", False):
+                break
+
+        async def replay_receive():
+            if messages:
+                return messages.pop(0)
+            # Streaming responses keep listening for ``http.disconnect`` after
+            # the request body is consumed. Returning an immediate empty body
+            # forever creates a busy loop and prevents SSE responses closing.
+            return await receive()
+
+        await self.app(scope, replay_receive, send)
 
 
 def create_app(services: ServiceContainer | None = None) -> FastAPI:
@@ -157,17 +242,11 @@ def create_app(services: ServiceContainer | None = None) -> FastAPI:
             allow_headers=["*"],
         )
 
-    # P1-026: reject oversized request bodies up front (413).
-    _MAX_REQUEST_BODY = int(os.environ.get("PERSONAL_AI_MAX_BODY_BYTES", "2_000_000"))
-
-    @app.middleware("http")
-    async def _limit_body_size(request: Request, call_next):  # noqa: ANN001
-        length = request.headers.get("content-length")
-        if length and length.isdigit() and int(length) > _MAX_REQUEST_BODY:
-            from fastapi.responses import JSONResponse
-
-            return JSONResponse(status_code=413, content={"detail": "request body too large"})
-        return await call_next(request)
+    # Reject both declared and chunked oversized bodies before endpoint parsing.
+    max_request_body = int(
+        os.environ.get("PERSONAL_AI_MAX_BODY_BYTES", "2_000_000")
+    )
+    app.add_middleware(_BodyLimitMiddleware, max_bytes=max_request_body)
 
     app.include_router(sessions.router)
     app.include_router(messages.router)

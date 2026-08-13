@@ -17,6 +17,22 @@ from personal_ai_os.model_gateway import ProviderConfigStore
 app = typer.Typer(help="Manage local LLM provider profiles (multi-API switching)")
 
 
+def _public_profile(profile) -> dict:  # noqa: ANN001
+    """Serialize provider metadata without ever copying the secret field."""
+    return {
+        "name": profile.name,
+        "format": profile.format,
+        "base_url": profile.base_url,
+        "model": profile.model,
+        "max_tokens": getattr(profile, "max_tokens", 0),
+        "created_at": getattr(profile, "created_at", ""),
+        "updated_at": getattr(profile, "updated_at", ""),
+        "key_configured": bool(
+            getattr(profile, "api_key", "") or getattr(profile, "secret_ref", "")
+        ),
+    }
+
+
 @app.command("init")
 def config_init() -> None:
     """Interactive first-run provider wizard (stores outside the repo)."""
@@ -32,7 +48,7 @@ def config_list(json_mode: bool = typer.Option(False, "--json", help="JSON outpu
     profiles = store.list_profiles()
     active = store.get_active_name()
     if json_mode:
-        payload = [p.to_dict() | {"active": p.name == active} for p in profiles]
+        payload = [_public_profile(p) | {"active": p.name == active} for p in profiles]
         sys.stdout.write(json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
         return
     if not profiles:
@@ -62,7 +78,7 @@ def config_show(json_mode: bool = typer.Option(False, "--json", help="JSON outpu
         sys.stdout.write("no active provider — run `personal-ai config init`\n")
         return
     if json_mode:
-        sys.stdout.write(json.dumps(profile.to_dict(), ensure_ascii=False, indent=2) + "\n")
+        sys.stdout.write(json.dumps(_public_profile(profile), ensure_ascii=False, indent=2) + "\n")
         return
     sys.stdout.write(
         f"name      : {profile.name}\n"

@@ -16,13 +16,26 @@ from connectors.http_fetch.connector import HttpFetchConnector
 
 
 def _filesystem_root() -> str:
-    return os.environ.get("PERSONAL_AI_WORKSPACE_ROOT") or os.getcwd()
+    configured = os.environ.get("PERSONAL_AI_WORKSPACE_ROOT")
+    if configured:
+        return configured
+    if os.environ.get("APP_ENV", "development").lower() == "production":
+        raise RuntimeError("production requires PERSONAL_AI_WORKSPACE_ROOT")
+    return os.getcwd()
+
+
+def _http_allowed_domains() -> list[str]:
+    raw = os.environ.get("PERSONAL_AI_HTTP_ALLOWED_DOMAINS", "")
+    domains = [item.strip() for item in raw.split(",") if item.strip()]
+    if not domains and os.environ.get("APP_ENV", "development").lower() == "production":
+        raise RuntimeError("production requires PERSONAL_AI_HTTP_ALLOWED_DOMAINS")
+    return domains
 
 
 BUILTIN_CONNECTORS = [
     CalculatorConnector(),
     FilesystemConnector(allowed_root=_filesystem_root()),
-    HttpFetchConnector(),
+    HttpFetchConnector(allowed_domains=_http_allowed_domains()),
 ]
 
 
@@ -35,7 +48,7 @@ def get_builtin_connectors(*, filesystem_root: str | None = None):
     return [
         CalculatorConnector(),
         FilesystemConnector(allowed_root=filesystem_root or _filesystem_root()),
-        HttpFetchConnector(),
+        HttpFetchConnector(allowed_domains=_http_allowed_domains()),
     ]
 
 

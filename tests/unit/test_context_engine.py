@@ -67,8 +67,7 @@ async def test_build_empty_state():
     built = await engine.build({})
     assert built["messages"][0]["role"] == "system"
     assert "Personal AI OS" in built["system_prompt"]
-    assert built["messages"][-1]["role"] == "user"
-    assert built["messages"][-1]["content"] == ""
+    assert all(message["role"] != "user" for message in built["messages"])
     assert built["token_count"] > 0
     assert "sections" in built
     assert "context_items" in built

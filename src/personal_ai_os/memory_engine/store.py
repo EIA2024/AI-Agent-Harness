@@ -138,9 +138,15 @@ class SQLMemoryStore:
 
     # -- read --------------------------------------------------------------
 
-    async def get(self, memory_id: UUID) -> Memory | None:
+    async def get(self, memory_id: UUID, *, owner_id: UUID) -> Memory | None:
         async with session_scope() as session:
-            row = await session.get(MemoryRow, memory_id)
+            row = (
+                await session.execute(
+                    select(MemoryRow).where(
+                        MemoryRow.id == memory_id, MemoryRow.owner_id == owner_id
+                    )
+                )
+            ).scalar_one_or_none()
             if row is None or row.status == "deleted":
                 return None
             return self.to_memory(row)
@@ -149,6 +155,7 @@ class SQLMemoryStore:
         self,
         memory_id: UUID,
         *,
+        owner_id: UUID,
         content: str | None = None,
         summary: str | None = None,
         importance: float | None = None,
@@ -156,7 +163,13 @@ class SQLMemoryStore:
         sensitivity: str | None = None,
     ) -> Memory | None:
         async with session_scope() as session:
-            row = await session.get(MemoryRow, memory_id)
+            row = (
+                await session.execute(
+                    select(MemoryRow).where(
+                        MemoryRow.id == memory_id, MemoryRow.owner_id == owner_id
+                    )
+                )
+            ).scalar_one_or_none()
             if row is None or row.status == "deleted":
                 return None
             if content is not None:
@@ -175,10 +188,16 @@ class SQLMemoryStore:
 
     # -- forget ------------------------------------------------------------
 
-    async def forget(self, memory_id: UUID) -> None:
+    async def forget(self, memory_id: UUID, *, owner_id: UUID) -> None:
         """Soft-delete a memory: status -> 'deleted', drop links, write audit."""
         async with session_scope() as session:
-            row = await session.get(MemoryRow, memory_id)
+            row = (
+                await session.execute(
+                    select(MemoryRow).where(
+                        MemoryRow.id == memory_id, MemoryRow.owner_id == owner_id
+                    )
+                )
+            ).scalar_one_or_none()
             if row is None:
                 return
             row.status = "deleted"

@@ -22,9 +22,23 @@ class FakeRunner:
 
     async def cancel(self, *, run_id):
         self.cancelled.append(run_id)
+        async with session_scope() as session:
+            run = await session.get(Run, run_id)
+            run.status = "cancelled"
 
     async def resume(self, *, run_id, approval_id=None, decision=None, edited_arguments=None):
         self.resumed.append((run_id, approval_id, decision, edited_arguments))
+        async with session_scope() as session:
+            run = await session.get(Run, run_id)
+            run.status = "running"
+            await session.flush()
+            await session.refresh(run)
+            return {
+                "id": str(run.id),
+                "status": run.status,
+                "input": run.input,
+                "state": run.state,
+            }
 
 
 async def _make_user(api_key: str) -> User:
@@ -78,6 +92,38 @@ async def test_run_detail(make_api, db):
 
         missing = await ac.get(f"/v1/runs/{uuid.uuid4()}", headers=headers)
         assert missing.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_run_detail_hides_internal_context_and_secrets(make_api, db):
+    u = await _make_user("runs-private-key")
+    async with session_scope() as session:
+        run = Run(
+            owner_id=u.id,
+            status="completed",
+            input={"api_key": "input-secret"},
+            state={
+                "final_response": "ok",
+                "_cached_context": {"system_prompt": "private prompt"},
+                "tool_results": [{"token": "result-secret"}],
+            },
+            started_at=datetime.now(UTC),
+        )
+        session.add(run)
+        await session.flush()
+        run_id = run.id
+
+    async with make_api(services=ServiceContainer()) as ac:
+        response = await ac.get(
+            f"/v1/runs/{run_id}", headers={"X-API-Key": "runs-private-key"}
+        )
+
+    body = response.json()
+    assert "_cached_context" not in body["state"]
+    assert body["input"]["api_key"] == "[REDACTED]"
+    assert body["state"]["tool_results"][0]["token"] == "[REDACTED]"
+    assert "input-secret" not in response.text
+    assert "result-secret" not in response.text
 
 
 @pytest.mark.asyncio

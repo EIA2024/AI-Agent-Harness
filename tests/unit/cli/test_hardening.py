@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import io
+import json
+from types import SimpleNamespace
 
 from personal_ai_os.cli.api.errors import TransportError
 from personal_ai_os.cli.commands.doctor import diagnose
@@ -94,3 +96,48 @@ def test_config_sources_shows_precedence(monkeypatch, tmp_path, capsys):
     config_sources()
     out = capsys.readouterr().out
     assert "api_url" in out and "default" in out and "profile" in out
+
+
+def test_config_json_never_exposes_provider_api_key(monkeypatch, capsys):
+    import personal_ai_os.cli.commands.config as config_mod
+
+    secret = "sk-DO-NOT-PRINT-THIS"
+    profile = SimpleNamespace(
+        name="main",
+        format="openai",
+        api_key=secret,
+        base_url="https://api.example.test/v1",
+        model="model",
+        updated_at="now",
+        masked_key=lambda: "sk-D…THIS",
+        to_dict=lambda: {
+            "name": "main",
+            "format": "openai",
+            "api_key": secret,
+            "base_url": "https://api.example.test/v1",
+            "model": "model",
+        },
+    )
+
+    class FakeStore:
+        def list_profiles(self):
+            return [profile]
+
+        def get_active_name(self):
+            return "main"
+
+        def get_active(self):
+            return profile
+
+    monkeypatch.setattr(config_mod, "ProviderConfigStore", FakeStore)
+
+    config_mod.config_list(json_mode=True)
+    listed = json.loads(capsys.readouterr().out)
+    config_mod.config_show(json_mode=True)
+    shown = json.loads(capsys.readouterr().out)
+
+    assert secret not in json.dumps([listed, shown])
+    assert "api_key" not in listed[0]
+    assert "api_key" not in shown
+    assert listed[0]["key_configured"] is True
+    assert shown["key_configured"] is True

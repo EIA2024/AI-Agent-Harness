@@ -42,8 +42,8 @@ Exit codes: `0` completed · `1` internal · `2` usage/config · `3` auth ·
 
 - The server's ToolBroker / Policy Engine are the source of truth for
   permissions; the CLI only displays and posts the user's decision.
-- Raw chain-of-thought is not shown by default; `thinking.delta` normalizes to a
-  suppressed progress event.
+- Raw chain-of-thought is never a public CLI surface; legacy `thinking.delta`
+  events are accepted for compatibility but their text is discarded.
 - All terminal output is sanitized against ANSI/OSC/control-sequence injection
   and sensitive argument values (api_key/token/password/…) are redacted.
 - API keys are never printed; `doctor` reports configured/missing only.

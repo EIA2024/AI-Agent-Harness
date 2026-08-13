@@ -21,7 +21,12 @@ from personal_ai_os.cli.api.errors import APIError, TransportError
 from personal_ai_os.cli.domain.events import UIEventType
 from personal_ai_os.cli.domain.normalizer import Normalizer
 from personal_ai_os.cli.domain.reducer import reduce
-from personal_ai_os.cli.domain.state import CELL_USER, TranscriptCell, initial_state
+from personal_ai_os.cli.domain.state import (
+    CELL_ASSISTANT,
+    CELL_USER,
+    TranscriptCell,
+    initial_state,
+)
 
 _REFRESH_INTERVAL = 0.05  # coalesce rapid deltas (plan §8)
 
@@ -47,6 +52,7 @@ class ChatController:
         self._streaming = False
         self._last_refresh = 0.0
         self.pending_approval: dict[str, Any] | None = None
+        self._restored = False
 
     @property
     def busy(self) -> bool:
@@ -61,6 +67,44 @@ class ChatController:
             created = await self.client.create_session(channel="cli")
             self.state.session_id = created.id
             self._refresh()
+
+    async def restore_session(self) -> None:
+        """Restore persisted messages and the active run for ``--session``."""
+        if self._restored or not self.state.session_id:
+            return
+        try:
+            detail = await self.client.get_session(self.state.session_id)
+            self._restored = True
+            for message in detail.get("messages") or []:
+                role = message.get("role")
+                content = str(message.get("content") or "")
+                if role == "user":
+                    self.state.transcript.append(
+                        TranscriptCell(kind=CELL_USER, payload={"restored": True}, text=content)
+                    )
+                elif role == "assistant":
+                    self.state.transcript.append(
+                        TranscriptCell(
+                            kind=CELL_ASSISTANT,
+                            payload={"restored": True, "streaming": False},
+                            text=content,
+                        )
+                    )
+                    self.state.final_response = content
+
+            run_id = detail.get("active_run_id")
+            if not run_id:
+                return
+            run = await self.client.get_run(run_id)
+            self.state.run_id = str(run.id)
+            self.state.run_status = run.status
+            if run.status == "waiting_approval":
+                await self._load_pending_approval()
+            elif run.status == "running":
+                self._streaming = True
+                self._stream_task = asyncio.create_task(self._stream(str(run.id)))
+        except (APIError, TransportError) as exc:
+            self.state.last_error = str(exc)
 
     async def send(self, prompt: str) -> bool:
         """Submit a prompt; spawn the stream task. Returns False if busy."""
@@ -106,9 +150,11 @@ class ChatController:
             self.pending_approval = {
                 "id": event_payload["approval_id"],
                 "run_id": self.state.run_id,
+                "tool_call_id": event_payload.get("tool_call_id"),
                 "tool_name": event_payload.get("tool_name", ""),
                 "action_summary": event_payload.get("action_summary", ""),
                 "risk_level": event_payload.get("risk_level", 0),
+                "arguments_preview": event_payload.get("arguments_preview") or {},
                 "status": "pending",
             }
             return
@@ -152,7 +198,12 @@ class ChatController:
                 await self.client.edit_approval(approval_id, edited_arguments)
             run_id = self.state.run_id
             if run_id:
-                await self.client.resume_run(run_id, approval_id=approval_id, decision=decision)
+                await self.client.resume_run(
+                    run_id,
+                    approval_id=approval_id,
+                    decision=decision,
+                    edited_arguments=edited_arguments if action == "edit" else None,
+                )
             # Only forget the pending approval after the resume succeeded; on a
             # 409 (concurrent resume) we keep it so the modal can be retried.
             self.pending_approval = None

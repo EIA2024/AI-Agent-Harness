@@ -3,8 +3,9 @@
 All endpoints are under the FastAPI app (`apps.api.main:create_app`). Interactive
 docs: `GET /docs` (Swagger UI) when the server is running.
 
-**Authentication** — every request must send an `X-API-Key` header matching a
-`users.api_key` row. When `PERSONAL_AI_DEV_API_KEY` is set on startup, a dev
+**Authentication** — every request must send an `X-API-Key` header. The server
+compares its HMAC digest with `users.api_key_hash`; raw keys are not stored for
+new users. When `PERSONAL_AI_DEV_API_KEY` is explicitly set on startup, a dev
 `owner` user is created with that key. A missing or unknown key → `401`.
 
 **Ownership** — all resources are scoped to the authenticated user
@@ -33,7 +34,7 @@ docs: `GET /docs` (Swagger UI) when the server is running.
 
 | Method | Path | Description |
 |---|---|---|
-| GET | `/v1/runs/{id}` | run detail: status, state (incl. `thinking`, `final_response`), steps, tool_calls |
+| GET | `/v1/runs/{id}` | run detail: status, public state (`final_response` etc.), steps, tool_calls; internal cached context/reasoning is omitted |
 | POST | `/v1/runs/{id}/cancel` | cancel a run (rejects pending approvals) |
 | POST | `/v1/runs/{id}/resume` | resume an approval-paused run; body `{approval_id?, decision?, edited_arguments?}` |
 | GET | `/v1/runs/{id}/stream` | SSE event stream (live during execution, DB replay after) |
@@ -42,7 +43,6 @@ docs: `GET /docs` (Swagger UI) when the server is running.
 
 ```
 event: run.started        data: {run_id, status}
-event: thinking.delta     data: {text}            # chain-of-thought
 event: text.delta         data: {text}            # streamed answer
 event: tool.requested     data: {tool_name, tool_call}
 event: run.completed      data: {run_id, status}
@@ -102,6 +102,6 @@ POST /v1/sessions/{sid}/messages            {"text": "1+1=?"}
 → 201 {"run_id": "…", "status": "running"}
 
 GET  /v1/runs/{rid}/stream                 (SSE)
-→ run.started → thinking.delta* → tool.requested
+→ run.started → tool.requested
 → text.delta* → run.completed
 ```

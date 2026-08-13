@@ -16,12 +16,18 @@ services:
       # loopback only — never 0.0.0.0 unless behind an authenticated proxy
       - "127.0.0.1:${API_PORT:-8000}:8000"
     environment:
+      - APP_ENV=production
       - DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER:?POSTGRES_USER is required}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/${POSTGRES_DB:-personal_ai_os}
+      - PERSONAL_AI_KEY_HASH_SECRET=${PERSONAL_AI_KEY_HASH_SECRET:?PERSONAL_AI_KEY_HASH_SECRET is required}
+      - PERSONAL_AI_WORKSPACE_ROOT=/workspace
+      - PERSONAL_AI_HTTP_ALLOWED_DOMAINS=${PERSONAL_AI_HTTP_ALLOWED_DOMAINS:?PERSONAL_AI_HTTP_ALLOWED_DOMAINS is required}
+      - PERSONAL_AI_DATA_DIR=/app/data
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
       # Dev key is OPT-IN and never has a default; omit entirely in production.
       - PERSONAL_AI_DEV_API_KEY=${PERSONAL_AI_DEV_API_KEY:-}
     volumes:
       - ./data:/app/data
+      - ./workspace:/workspace
     depends_on:
       postgres:
         condition: service_healthy

@@ -1,7 +1,7 @@
 """Contract tests for the legacy sync APIClient (CLI v2 Phase 0, T02).
 
-These pin the pre-v2 HTTP behavior so the v2 async client can replace it
-without silently breaking callers.
+The compatibility client now shares the v2 rule that transports never print
+or raise ``SystemExit``; only the command boundary renders typed failures.
 """
 
 from __future__ import annotations
@@ -10,6 +10,7 @@ import httpx
 import pytest
 
 from personal_ai_os.cli import legacy
+from personal_ai_os.cli.api.errors import ServerError
 
 
 def _echo_handler(request: httpx.Request) -> httpx.Response:
@@ -54,19 +55,18 @@ def test_get_post_delete_delegate_to_request():
     assert client.delete("/ok") == {"hello": "world"}
 
 
-def test_error_raises_systemexit_and_prints_stderr(capsys):
+def test_error_is_typed_and_transport_prints_nothing(capsys):
     client = _client_with(_echo_handler)
-    with pytest.raises(SystemExit) as exc:
+    with pytest.raises(ServerError) as exc:
         client.get("/boom")
-    assert exc.value.code == 1
-    captured = capsys.readouterr()
-    assert "Error 500" in captured.err
-    assert "internal" in captured.err
+    assert exc.value.status_code == 500
+    assert exc.value.detail == "internal"
+    assert capsys.readouterr().err == ""
 
 
 def test_non_json_error_body_does_not_crash(capsys):
     client = _client_with(_echo_handler)
-    with pytest.raises(SystemExit):
+    with pytest.raises(ServerError) as exc:
         client.get("/text-boom")
-    captured = capsys.readouterr()
-    assert "bad gateway raw" in captured.err
+    assert exc.value.detail == "bad gateway raw"
+    assert capsys.readouterr().err == ""

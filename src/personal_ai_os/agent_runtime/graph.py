@@ -436,8 +436,7 @@ def _serialize_tool_result(result: Any, pending: Any, name: str, ctx: ToolExecut
         data = dict(result)
     else:
         data = {"text": str(result)}
-    # Honour the tool descriptor's result_trust; default to trusted_tool for
-    # built-in connectors that don't surface external content.
+    # Honour validated descriptors; missing labels fail closed.
     trust = tool_trust or "untrusted_tool"
     data.update(
         {

@@ -11,6 +11,7 @@ import asyncio
 import sys
 
 from personal_ai_os.cli.api.client import AsyncAPIClient
+from personal_ai_os.cli.domain.state import AppState
 from personal_ai_os.cli.tui.capabilities import color_enabled, is_tty
 
 
@@ -28,13 +29,35 @@ class _PlainSink:
         pass
 
 
+def plain_transcript_lines(state: AppState, cursor: int) -> tuple[list[str], int]:
+    """Render only transcript cells added after ``cursor`` using safe renderers."""
+    from personal_ai_os.cli.tui.render import cell_lines
+
+    start = min(max(cursor, 0), len(state.transcript))
+    lines: list[str] = []
+    for cell in state.transcript[start:]:
+        lines.extend(cell_lines(cell))
+    return lines, len(state.transcript)
+
+
 async def run_plain(client: AsyncAPIClient, *, session_id: str | None = None) -> None:
     """Non-TTY interactive loop: plain transcript lines + ``input()``."""
     from personal_ai_os.cli.tui.controllers.chat import ChatController
 
     sink = _PlainSink()
     controller = ChatController(client, sink, session_id=session_id)
+    await controller.restore_session()
     sink.state = controller.state
+    restored_lines, transcript_cursor = plain_transcript_lines(controller.state, 0)
+    for line in restored_lines:
+        print(line)
+    while controller.busy:
+        await asyncio.sleep(0.05)
+    resumed_lines, transcript_cursor = plain_transcript_lines(
+        controller.state, transcript_cursor
+    )
+    for line in resumed_lines:
+        print(line)
     print("Personal AI — plain mode (type Ctrl+C to exit).", file=sys.stderr)
     while True:
         try:
@@ -50,9 +73,11 @@ async def run_plain(client: AsyncAPIClient, *, session_id: str | None = None) ->
         await controller.send(prompt.strip())
         while controller.busy:
             await asyncio.sleep(0.05)
-        for line in controller.state.transcript:
-            if line.kind == "assistant" and line.text:
-                print(line.text)
+        lines, transcript_cursor = plain_transcript_lines(
+            controller.state, transcript_cursor
+        )
+        for line in lines:
+            print(line)
         if controller.state.run_status == "waiting_approval":
             print("! approval required — use `personal-ai approvals list`", file=sys.stderr)
 
