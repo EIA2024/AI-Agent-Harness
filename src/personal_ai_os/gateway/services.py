@@ -20,6 +20,19 @@ def _production() -> bool:
     return os.environ.get("APP_ENV", "development").lower() == "production"
 
 
+async def has_active_runs() -> bool:
+    """Return whether any process-wide provider consumer is still active."""
+    from sqlalchemy import exists, select
+
+    from personal_ai_os.agent_runtime.runner import ACTIVE_RUN_STATUSES
+    from personal_ai_os.db.models import Run
+    from personal_ai_os.db.session import session_scope
+
+    async with session_scope() as session:
+        query = select(exists().where(Run.status.in_(ACTIVE_RUN_STATUSES)))
+        return bool((await session.execute(query)).scalar())
+
+
 @dataclass
 class ServiceContainer:
     """All injectable cross-department services. ``None`` = not wired up."""
@@ -27,6 +40,7 @@ class ServiceContainer:
     router: Any = None
     event_bus: Any = None
     model_provider: Any = None
+    provider_runtime: Any = None
     tool_registry: Any = None
     tool_broker: Any = None
     capabilities: Any = None
@@ -137,64 +151,14 @@ def build_default_services() -> ServiceContainer:
 
     # -- model gateway ------------------------------------------------------
 
-    def _model_provider():
-        from personal_ai_os.model_gateway import (
-            EchoProvider,
-            ModelRouter,
-            ProviderConfigStore,
-        )
+    def _provider_runtime():
+        from personal_ai_os.model_gateway import ProviderRuntimeService
 
-        profile = ProviderConfigStore().get_active()
+        return ProviderRuntimeService(active_run_checker=has_active_runs)
 
-        if profile is not None:
-            if profile.format == "openai":
-                from personal_ai_os.model_gateway import OpenAICompatibleProvider
-
-                provider = OpenAICompatibleProvider(
-                    api_key=profile.api_key,
-                    base_url=profile.base_url or "https://api.openai.com/v1",
-                    default_model=profile.model or "gpt-4o-mini",
-                    default_max_tokens=profile.max_tokens or 4096,
-                )
-                logger.info(
-                    "Using provider profile %r (%s, %s)",
-                    profile.name, profile.format, provider.base_url,
-                )
-            elif profile.format == "anthropic":
-                from personal_ai_os.model_gateway import AnthropicProvider
-
-                provider = AnthropicProvider(
-                    api_key=profile.api_key,
-                    default_model=profile.model or "claude-haiku-4-5",
-                )
-                logger.info("Using provider profile %r (anthropic)", profile.name)
-            else:
-                return EchoProvider()
-            # Route every purpose to the profile's single model.
-            model = getattr(provider, "default_model", "default")
-            config = {
-                "roles": {
-                    "router": [model],
-                    "worker": [model],
-                    "vision": [model],
-                    "embedding": [],
-                }
-            }
-            return ModelRouter(providers={"primary": provider}, config=config)
-
-        # No profile configured → fall back to env key, else demo echo.
-        api_key = os.getenv("ANTHROPIC_API_KEY")
-        if api_key:
-            from personal_ai_os.model_gateway import AnthropicProvider
-
-            return ModelRouter(providers={"anthropic": AnthropicProvider(api_key=api_key)})
-        logger.warning(
-            "No LLM provider profile configured (run `personal-ai config init`); "
-            "using EchoProvider demo mode."
-        )
-        return EchoProvider()
-
-    container.model_provider = _lazy(_model_provider)
+    container.provider_runtime = _lazy(_provider_runtime)
+    if container.provider_runtime is not None:
+        container.model_provider = container.provider_runtime.provider
 
     # -- context engine -----------------------------------------------------
 

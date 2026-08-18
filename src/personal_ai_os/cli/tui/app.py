@@ -9,7 +9,10 @@ and approval resolution.
 from __future__ import annotations
 
 import asyncio
+import copy
+import ipaddress
 import json
+from urllib.parse import urlparse
 
 from textual.app import App, ComposeResult
 from textual.containers import VerticalScroll
@@ -17,16 +20,35 @@ from textual.widgets import Footer, Header
 
 from personal_ai_os.cli.api.client import AsyncAPIClient
 from personal_ai_os.cli.bootstrap import build_client
+from personal_ai_os.cli.domain.state import (
+    apply_provider_status,
+    begin_provider_status_query,
+    fail_provider_status_query,
+)
 from personal_ai_os.cli.sanitize import redact_secrets, strip_control_sequences
 from personal_ai_os.cli.tui.command_registry import list_commands, lookup
 from personal_ai_os.cli.tui.controllers.chat import ChatController
 from personal_ai_os.cli.tui.keymap import BINDINGS as KEYMAP_BINDINGS
+from personal_ai_os.cli.tui.model_flow import (
+    ModelScreenData,
+    ModelSelection,
+    load_model_screen_data,
+    save_model_selection,
+)
+from personal_ai_os.cli.tui.render import provider_status_lines
+from personal_ai_os.cli.tui.screens.api_config import (
+    APIConfigRequest,
+    APIConfigScreen,
+)
 from personal_ai_os.cli.tui.screens.approval import ApprovalScreen
 from personal_ai_os.cli.tui.screens.confirm import ConfirmScreen
 from personal_ai_os.cli.tui.screens.info import InfoScreen
+from personal_ai_os.cli.tui.screens.model import ModelScreen
 from personal_ai_os.cli.tui.widgets.composer import Composer
+from personal_ai_os.cli.tui.widgets.provider_notice import ProviderNotice
 from personal_ai_os.cli.tui.widgets.status_bar import StatusBar
 from personal_ai_os.cli.tui.widgets.transcript import Transcript
+from personal_ai_os.model_gateway import ProviderConfigStore, ProviderProfile
 
 _CSS = """
 Screen { layout: vertical; }
@@ -50,6 +72,12 @@ Screen { layout: vertical; }
     color: $text-muted;
     padding: 0 1;
 }
+#provider-notice {
+    height: auto;
+    background: $warning-muted;
+    color: $text;
+    padding: 0 1;
+}
 .approval-panel {
     width: 80%;
     height: auto;
@@ -66,6 +94,20 @@ Screen { layout: vertical; }
     padding: 1 2;
 }
 #info-title { text-style: bold; margin-bottom: 1; }
+#api-panel {
+    width: 80%;
+    height: auto;
+    max-height: 95%;
+    border: round $accent;
+    background: $surface;
+    padding: 1 2;
+}
+#api-title { text-style: bold; margin-bottom: 1; }
+#api-runtime { color: $text-muted; margin-bottom: 1; }
+#api-actions { height: auto; margin-top: 1; }
+#api-actions Button { margin-right: 1; }
+#api-error { color: $error; height: auto; }
+#api-key-state { color: $text-muted; height: auto; }
 """
 
 
@@ -84,19 +126,23 @@ class PersonalAIApp(App):
         client: AsyncAPIClient | None = None,
         *,
         session_id: str | None = None,
+        provider_store: ProviderConfigStore | None = None,
         **kwargs,
     ) -> None:
         super().__init__(**kwargs)
         self._client = client
         self._session_id = session_id
         self._owns_client = client is None
+        self._provider_store = provider_store or ProviderConfigStore()
         self.controller: ChatController | None = None
+        self._model_screen_data: ModelScreenData | None = None
         self._approval_open = False
         self._pending_memory_forget: str | None = None
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=False)
         yield StatusBar(id="status")
+        yield ProviderNotice(id="provider-notice")
         yield VerticalScroll(Transcript(id="transcript"), id="scroll")
         yield Composer(id="composer")
         yield Footer()
@@ -108,6 +154,7 @@ class PersonalAIApp(App):
             self._client, self, session_id=self._session_id
         )
         await self.controller.restore_session()
+        await self._refresh_provider_status()
         self.refresh_ui()
         self.query_one("#composer", Composer).focus()
 
@@ -133,6 +180,7 @@ class PersonalAIApp(App):
             return
         state = self.controller.state
         self.query_one("#status", StatusBar).render_state(state)
+        self.query_one("#provider-notice", ProviderNotice).render_state(state)
         self.query_one("#transcript", Transcript).render_state(state)
         self.query_one("#composer", Composer).set_disabled(self.controller.busy)
         if self.controller.pending_approval and not self._approval_open:
@@ -257,15 +305,234 @@ class PersonalAIApp(App):
         lines = [
             f"Session   : {state.session_id or '-'}",
             f"Run       : {state.run_status} · {state.run_id or '-'}",
-            f"Model     : {state.model or 'unknown'}",
-            f"API       : {self._client.base_url if self._client else '-'}",
-            f"Connection: {state.connection_state.value}",
+            f"API endpoint: {self._client.base_url if self._client else '-'}",
         ]
+        lines.extend(provider_status_lines(state))
         if state.pending_approval:
             lines.append(f"Approval  : pending ({state.pending_approval.get('tool_name', '?')})")
         if state.last_error:
             lines.append(f"Last error: {strip_control_sequences(state.last_error)}")
         self.push_screen(InfoScreen("Status", lines))
+
+    async def _refresh_provider_status(self) -> None:
+        if self.controller is None or self._client is None:
+            return
+        begin_provider_status_query(self.controller.state)
+        try:
+            status = await self._client.get_provider_status()
+        except Exception:  # noqa: BLE001 - chat remains usable if status is unavailable
+            fail_provider_status_query(self.controller.state)
+            return
+        apply_provider_status(self.controller.state, status)
+
+    async def cmd_api(self, _args: str) -> None:
+        if self.controller is None or self._client is None:
+            return
+        if self.controller.busy:
+            self.notify(
+                "A run is active; cancel it before switching provider",
+                timeout=3,
+            )
+            return
+        if not _is_local_api(self._client.base_url):
+            self.notify(
+                "Provider profiles can only be changed for a local API; "
+                "configure the remote server instead",
+                timeout=5,
+            )
+            return
+        try:
+            status = await self._client.get_provider_status()
+        except Exception as exc:  # noqa: BLE001
+            self.notify(
+                f"provider status error: {self._provider_error(exc)}",
+                timeout=4,
+            )
+            return
+        summary = (
+            f"Runtime: {status.provider} · {status.model}"
+            if status.mode != "echo"
+            else "Runtime: Echo (no provider configured)"
+        )
+        self.push_screen(
+            APIConfigScreen(
+                self._provider_store.list_profiles(),
+                active_name=self._provider_store.get_active_name(),
+                runtime_summary=summary,
+            ),
+            callback=self._on_api_config,
+        )
+
+    async def _on_api_config(self, request: APIConfigRequest | None) -> None:
+        if request is None or self._client is None:
+            return
+        if self.controller is not None and self.controller.busy:
+            self.notify(
+                "A run is active; provider configuration was not changed",
+                timeout=3,
+            )
+            return
+
+        previous_active = self._provider_store.get_active_name()
+        previous_profile = copy.deepcopy(
+            self._provider_store.get(request.profile_name)
+        )
+        changed = False
+        try:
+            if request.action == "activate":
+                if not self._provider_store.set_active(request.profile_name):
+                    raise ValueError(f"Unknown profile {request.profile_name!r}")
+            elif request.action == "add":
+                self._provider_store.add(
+                    ProviderProfile(
+                        name=request.profile_name,
+                        format=request.format,
+                        api_key=request.api_key,
+                        base_url=request.base_url,
+                        model=request.model,
+                    )
+                )
+            elif request.action == "update":
+                fields = {
+                    "format": request.format,
+                    "base_url": request.base_url,
+                    "model": request.model,
+                }
+                if request.api_key:
+                    fields["api_key"] = request.api_key
+                if self._provider_store.update(
+                    request.profile_name, **fields
+                ) is None:
+                    raise ValueError(f"Unknown profile {request.profile_name!r}")
+                self._provider_store.set_active(request.profile_name)
+            else:
+                raise ValueError("Unsupported provider configuration action")
+            changed = True
+            status = await self._client.reload_provider(
+                str(self._provider_store.path.parent)
+            )
+        except Exception as exc:  # noqa: BLE001
+            if changed:
+                self._rollback_provider_change(
+                    request, previous_active, previous_profile
+                )
+            self.notify(
+                f"provider configuration failed: "
+                f"{self._provider_error(exc, request.api_key)}",
+                timeout=5,
+            )
+            return
+
+        if self.controller is not None:
+            apply_provider_status(self.controller.state, status)
+            self.refresh_ui()
+        self.notify(
+            f"Provider active: {status.profile or status.provider} · {status.model}",
+            timeout=3,
+        )
+
+    async def cmd_model(self, _args: str) -> None:
+        if self.controller is None or self._client is None:
+            return
+        if self.controller.busy:
+            self.notify(
+                "A run is active; cancel it before switching model",
+                timeout=3,
+            )
+            return
+        if not _is_local_api(self._client.base_url):
+            self.notify(
+                "Models can only be changed for a local API with shared "
+                "configuration; configure the remote server instead",
+                timeout=5,
+            )
+            return
+        try:
+            data = await load_model_screen_data(self._client)
+        except Exception as exc:  # noqa: BLE001
+            self.notify(
+                f"model configuration error: {self._provider_error(exc)}",
+                timeout=4,
+            )
+            return
+        if data.provider == "echo":
+            self.notify("Configure an LLM provider with /api before selecting a model")
+            return
+        self._model_screen_data = data
+        self.push_screen(ModelScreen(data), callback=self._on_model_selection)
+
+    async def _on_model_selection(
+        self, selection: ModelSelection | None
+    ) -> None:
+        data = self._model_screen_data
+        self._model_screen_data = None
+        if selection is None or data is None or self._client is None:
+            return
+        if self.controller is not None and self.controller.busy:
+            self.notify(
+                "A run is active; model configuration was not changed",
+                timeout=3,
+            )
+            return
+        try:
+            status = await save_model_selection(
+                self._client,
+                config_dir=str(self._provider_store.path.parent),
+                screen_data=data,
+                selection=selection,
+            )
+        except Exception as exc:  # noqa: BLE001
+            self.notify(
+                f"model configuration failed: {self._provider_error(exc)}",
+                timeout=5,
+            )
+            return
+        if self.controller is not None:
+            apply_provider_status(self.controller.state, status)
+            self.refresh_ui()
+        self.notify(
+            f"Model active: {status.model} · effort {status.reasoning_effort}",
+            timeout=3,
+        )
+
+    def _rollback_provider_change(
+        self,
+        request: APIConfigRequest,
+        previous_active: str | None,
+        previous_profile: ProviderProfile | None,
+    ) -> None:
+        try:
+            if request.action == "add":
+                self._provider_store.remove(request.profile_name)
+            elif request.action == "update" and previous_profile is not None:
+                self._provider_store.update(
+                    previous_profile.name,
+                    format=previous_profile.format,
+                    base_url=previous_profile.base_url,
+                    model=previous_profile.model,
+                    reasoning_effort=previous_profile.reasoning_effort,
+                    max_tokens=previous_profile.max_tokens,
+                    api_key=previous_profile.api_key,
+                )
+                if not previous_profile.api_key:
+                    self._provider_store.vault.delete(previous_profile.name)
+            if previous_active is not None:
+                self._provider_store.set_active(previous_active)
+            else:
+                self._provider_store.clear_active()
+        except Exception:  # noqa: BLE001 - keep the original safe error surface
+            pass
+
+    def _provider_error(self, exc: Exception, api_key: str = "") -> str:
+        message = strip_control_sequences(str(exc))
+        secrets = [api_key]
+        secrets.extend(
+            profile.api_key for profile in self._provider_store.list_profiles()
+        )
+        for secret in secrets:
+            if secret:
+                message = message.replace(secret, "***")
+        return message
 
     async def cmd_context(self, _args: str) -> None:
         if self.controller is None or self._client is None:
@@ -367,10 +634,27 @@ class PersonalAIApp(App):
 
 
 def create_app(
-    client: AsyncAPIClient | None = None, *, session_id: str | None = None
+    client: AsyncAPIClient | None = None,
+    *,
+    session_id: str | None = None,
+    provider_store: ProviderConfigStore | None = None,
 ) -> PersonalAIApp:
     """App factory (used by tests and the plain fallback entry)."""
-    return PersonalAIApp(client=client, session_id=session_id)
+    return PersonalAIApp(
+        client=client,
+        session_id=session_id,
+        provider_store=provider_store,
+    )
+
+
+def _is_local_api(base_url: str) -> bool:
+    hostname = (urlparse(base_url).hostname or "").lower()
+    if hostname == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(hostname).is_loopback
+    except ValueError:
+        return False
 
 
 def context_summary_lines(state, run) -> list[str]:  # noqa: ANN001

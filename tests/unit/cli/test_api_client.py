@@ -116,6 +116,56 @@ async def test_get_run_parses_final_response():
     assert run.final_response == "hi"
 
 
+async def test_provider_control_methods_map_dtos_and_request_bodies():
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.path == "/v1/provider/models":
+            return _json_response(
+                {
+                    "provider": "deepseek",
+                    "current_model": "deepseek-chat",
+                    "models": ["deepseek-chat", "deepseek-reasoner"],
+                    "capabilities": {"reasoning_efforts": ["auto"]},
+                }
+            )
+        body = json.loads(request.content) if request.content else {}
+        return _json_response(
+            {
+                "mode": "provider",
+                "profile": "deepseek",
+                "format": "openai",
+                "provider": "deepseek",
+                "model": body.get("model", "deepseek-chat"),
+                "reasoning_effort": body.get("reasoning_effort", "auto"),
+                "capabilities": {"reasoning_efforts": ["auto"]},
+            }
+        )
+
+    client = _make_client(handler)
+    status = await client.get_provider_status()
+    reloaded = await client.reload_provider("/shared")
+    models = await client.list_provider_models()
+    updated = await client.update_provider_model(
+        config_dir="/shared",
+        model="deepseek-reasoner",
+    )
+
+    assert status.provider == "deepseek"
+    assert reloaded.model == "deepseek-chat"
+    assert models.models == ["deepseek-chat", "deepseek-reasoner"]
+    assert updated.model == "deepseek-reasoner"
+    reload_body = json.loads(requests[1].content)
+    update_body = json.loads(requests[3].content)
+    assert reload_body == {"config_dir": "/shared"}
+    assert update_body == {
+        "config_dir": "/shared",
+        "model": "deepseek-reasoner",
+        "reasoning_effort": "auto",
+    }
+
+
 async def test_approval_dto_from_list():
     def handler(request: httpx.Request) -> httpx.Response:
         return _json_response(

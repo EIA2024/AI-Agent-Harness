@@ -20,6 +20,8 @@ class CommandSpec:
 REGISTRY: tuple[CommandSpec, ...] = (
     CommandSpec("help", "Show key bindings and commands", "cmd_help"),
     CommandSpec("status", "Show session, model, run and connection state", "cmd_status"),
+    CommandSpec("api", "Configure or switch LLM provider profiles", "cmd_api"),
+    CommandSpec("model", "Select the LLM model and reasoning effort", "cmd_model"),
     CommandSpec("context", "Show context summary", "cmd_context"),
     CommandSpec("memory", "List / search memories", "cmd_memory"),
     CommandSpec("tools", "List server-registered tools", "cmd_tools"),

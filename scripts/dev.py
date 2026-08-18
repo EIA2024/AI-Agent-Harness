@@ -21,7 +21,6 @@ from pathlib import Path
 from dotenv import dotenv_values
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-API_URL = "http://127.0.0.1:8000"
 ENV_FILE = os.path.join(ROOT, ".env")
 DEV_API_KEY_VAR = "PERSONAL_AI_DEV_API_KEY"
 CLI_API_KEY_VAR = "PERSONAL_AI_API_KEY"
@@ -99,17 +98,23 @@ def _env() -> dict:
     return env
 
 
-def _api_alive() -> bool:
+def _api_url(env: dict) -> str:
+    """Return the local API URL from the server's configured port."""
+    port = int(env.get("PERSONAL_AI_PORT", "8000"))
+    return f"http://127.0.0.1:{port}"
+
+
+def _api_alive(api_url: str) -> bool:
     try:
-        urllib.request.urlopen(f"{API_URL}/healthz", timeout=1)
+        urllib.request.urlopen(f"{api_url}/healthz", timeout=1)
         return True
     except Exception:  # noqa: BLE001
         return False
 
 
-def _api_usable(env: dict) -> bool:
+def _api_usable(api_url: str, env: dict) -> bool:
     request = urllib.request.Request(
-        f"{API_URL}/v1/tools",
+        f"{api_url}/v1/tools",
         headers={"X-API-Key": env[CLI_API_KEY_VAR]},
     )
     try:
@@ -126,6 +131,8 @@ def main() -> None:
     print("=" * 60)
     env = _env()
     python = _python_command()
+    api_url = _api_url(env)
+    env["PERSONAL_AI_API_URL"] = api_url
 
     # 1. migrate the local SQLite dev DB (best-effort; fresh DBs are created by
     #    create_all on app startup, but existing DBs need the new columns).
@@ -142,16 +149,16 @@ def main() -> None:
 
     # 2. Windows opens the API in its own console; other platforms use a child process.
     api: subprocess.Popen | None = None
-    if _api_alive():
-        if not _api_usable(env):
+    if _api_alive(api_url):
+        if not _api_usable(api_url, env):
             print(
-                "    API 已在 :8000 运行，但不接受当前本地开发密钥；"
+                f"    API 已在 {api_url} 运行，但不接受当前本地开发密钥；"
                 "请先关闭旧 API 窗口后重新运行本脚本。"
             )
             raise SystemExit(1)
         print("    API 已在运行，复用现有实例。")
     else:
-        print(f"\n[2/3] 启动 API 服务 → {API_URL}…")
+        print(f"\n[2/3] 启动 API 服务 → {api_url}…")
         api = subprocess.Popen(
             [*python, "-m", "apps.api.main"],
             cwd=ROOT, env=env,
@@ -159,12 +166,21 @@ def main() -> None:
         )
         print("    等待服务就绪…")
         for _ in range(90):
-            if _api_alive():
+            if _api_alive(api_url):
                 break
+            if api.poll() is not None:
+                print(
+                    f"    API 在监听 {api_url} 前退出（退出码 {api.returncode}）。"
+                    "端口可能已被其他进程占用。"
+                )
+                raise SystemExit(1)
             time.sleep(1)
-        if not _api_alive():
+        if not _api_alive(api_url):
             print("    API 未在预期时间内就绪，请查看 API 窗口输出。")
-        elif not _api_usable(env):
+            if api.poll() is None:
+                api.terminate()
+            raise SystemExit(1)
+        if not _api_usable(api_url, env):
             print("    API 已启动但鉴权检查失败，请查看 API 窗口输出。")
             if api is not None and api.poll() is None:
                 api.terminate()

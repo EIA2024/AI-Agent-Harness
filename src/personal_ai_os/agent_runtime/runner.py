@@ -12,6 +12,7 @@ import asyncio
 import logging
 import os
 import uuid
+from contextlib import nullcontext
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -703,21 +704,25 @@ class RunRunner:
         running = dict(initial)
         inputs: Any = Command(resume=resume_value) if resume_value is not None else initial
         try:
-            async for chunk in self.compiled.astream(inputs, config=config, stream_mode="updates"):
-                if "__interrupt__" in chunk:
-                    interrupts = chunk["__interrupt__"]
-                    if interrupts:
-                        first = interrupts[0]
-                        interrupt_payload = getattr(first, "value", first)
-                    await self._persist_step(
-                        run_id, "approval", running, status="waiting_approval"
-                    )
-                    break
-                for node_name, update in chunk.items():
-                    running.update(update)
-                    await self._persist_step(
-                        run_id, node_name, running, update=update
-                    )
+            pin = getattr(self.model_provider, "pin", None)
+            with pin() if pin is not None else nullcontext():
+                async for chunk in self.compiled.astream(
+                    inputs, config=config, stream_mode="updates"
+                ):
+                    if "__interrupt__" in chunk:
+                        interrupts = chunk["__interrupt__"]
+                        if interrupts:
+                            first = interrupts[0]
+                            interrupt_payload = getattr(first, "value", first)
+                        await self._persist_step(
+                            run_id, "approval", running, status="waiting_approval"
+                        )
+                        break
+                    for node_name, update in chunk.items():
+                        running.update(update)
+                        await self._persist_step(
+                            run_id, node_name, running, update=update
+                        )
         except Exception:
             running["status"] = "failed"
             raise

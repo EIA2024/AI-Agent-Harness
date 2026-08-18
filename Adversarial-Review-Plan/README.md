@@ -6,6 +6,12 @@
 - Review date: 2026-08-12
 - 目标执行模型: DeepSeek（因此任务卡故意写得冗余、显式、可验证）
 
+> **历史状态（2026-08-17）**：本目录是针对上述旧 tree 的审查快照，不是
+> `main` 的现役缺陷清单。修复与剩余风险的后续记录见
+> [`docs/agent-memory/README.md`](../docs/agent-memory/README.md)，当前系统合同以
+> [`README.md`](../README.md)、[`docs/ARCHITECTURE.md`](../docs/ARCHITECTURE.md)
+> 和测试为准。
+
 > 结论分级：`VERIFIED` 表示可由当前分支代码直接证明；`PROJECTED` 表示当前设计在指定扩展条件下高概率出问题。不要把 PROJECTED 当成线上已发生事故。
 > 本包是 adversarial review，不承诺数学意义上的“所有 bug”，但覆盖了当前可见主链：API → Runner → LangGraph → ToolBroker/Policy/Approval → Connectors → Context/Memory → DB → SSE/CLI → Deploy。
 

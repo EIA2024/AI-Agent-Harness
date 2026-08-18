@@ -141,3 +141,31 @@ def test_config_json_never_exposes_provider_api_key(monkeypatch, capsys):
     assert "api_key" not in shown
     assert listed[0]["key_configured"] is True
     assert shown["key_configured"] is True
+
+
+def test_config_validate_uses_shared_profile_capabilities(monkeypatch, capsys):
+    import pytest
+    import typer
+
+    import personal_ai_os.cli.commands.config as config_mod
+    from personal_ai_os.model_gateway import ProviderProfile
+
+    profile = ProviderProfile(
+        name="deepseek",
+        format="openai",
+        api_key="configured",
+        base_url="https://api.deepseek.com/v1",
+        model="deepseek-chat",
+        reasoning_effort="high",
+    )
+
+    class FakeStore:
+        def list_profiles(self):
+            return [profile]
+
+    monkeypatch.setattr(config_mod, "ProviderConfigStore", FakeStore)
+
+    with pytest.raises(typer.Exit):
+        config_mod.config_validate()
+
+    assert "reasoning effort 'high' is unsupported" in capsys.readouterr().out

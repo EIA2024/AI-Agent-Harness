@@ -9,6 +9,7 @@ BASE="http://127.0.0.1:${PORT}"
 LOG_FILE="$(mktemp "${TMPDIR:-/tmp}/paos_smoke.XXXXXX")"
 DB_FILE="$(mktemp "${TMPDIR:-/tmp}/paos_smoke_db.XXXXXX")"
 BODY_FILE="$(mktemp "${TMPDIR:-/tmp}/paos_smoke_body.XXXXXX")"
+DATA_DIR="$(mktemp -d "${TMPDIR:-/tmp}/paos_smoke_data.XXXXXX")"
 SERVER_PID=""
 
 if command -v uv >/dev/null 2>&1; then
@@ -38,7 +39,8 @@ cleanup() {
   if [ "$status" -ne 0 ]; then
     show_log
   fi
-  rm -f "$LOG_FILE" "$DB_FILE" "$DB_FILE-shm" "$DB_FILE-wal" "$BODY_FILE"
+    rm -f "$LOG_FILE" "$DB_FILE" "$DB_FILE-shm" "$DB_FILE-wal" "$BODY_FILE"
+    rm -rf "$DATA_DIR"
   exit "$status"
 }
 trap cleanup EXIT
@@ -59,6 +61,7 @@ fi
 export PERSONAL_AI_DEV_API_KEY="$SMOKE_API_KEY"
 export PERSONAL_AI_API_KEY="$SMOKE_API_KEY"
 export PERSONAL_AI_KEY_HASH_SECRET="$SMOKE_HASH_SECRET"
+export PERSONAL_AI_DATA_DIR="$DATA_DIR"
 AUTH_HEADER="X-API-Key: $SMOKE_API_KEY"
 
 echo "==> Starting API on :${PORT} (EchoProvider demo mode)"

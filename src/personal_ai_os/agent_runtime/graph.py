@@ -301,6 +301,9 @@ async def _model_call(deps: _Deps, state: dict, request: ModelRequest) -> ModelR
                         {"tool_name": fn.get("name", ""), "tool_call": first},
                     )
                 elif ev.type == "done":
+                    if ev.text and not content_parts:
+                        content_parts.append(ev.text)
+                        push_live(run_id, "text.delta", {"text": ev.text})
                     usage = ev.usage
         except Exception as exc:
             if content_parts or thinking_parts:

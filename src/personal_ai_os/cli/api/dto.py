@@ -248,6 +248,46 @@ class AuditDTO:
 
 
 @dataclass(frozen=True)
+class ProviderStatusDTO:
+    mode: str = "echo"
+    profile: str | None = None
+    format: str | None = None
+    provider: str = "echo"
+    model: str = "echo"
+    reasoning_effort: str = "auto"
+    capabilities: dict[str, Any] = field(default_factory=dict)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> ProviderStatusDTO:
+        return cls(
+            mode=_d(data, "mode") or "echo",
+            profile=_d(data, "profile"),
+            format=_d(data, "format"),
+            provider=_d(data, "provider") or "echo",
+            model=_d(data, "model") or "echo",
+            reasoning_effort=_d(data, "reasoning_effort") or "auto",
+            capabilities=_d(data, "capabilities") or {},
+        )
+
+
+@dataclass(frozen=True)
+class ProviderModelsDTO:
+    provider: str
+    current_model: str
+    models: list[str] = field(default_factory=list)
+    capabilities: dict[str, Any] = field(default_factory=dict)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> ProviderModelsDTO:
+        return cls(
+            provider=_d(data, "provider") or "",
+            current_model=_d(data, "current_model") or "",
+            models=[str(model) for model in (_d(data, "models") or [])],
+            capabilities=_d(data, "capabilities") or {},
+        )
+
+
+@dataclass(frozen=True)
 class MessageDTO:
     id: str
     role: str = ""

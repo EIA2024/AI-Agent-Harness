@@ -15,9 +15,18 @@ from tests.unit.cli import sse_fixtures
 class FakeClient:
     """Minimal AsyncAPIClient stand-in that replays a fixture's SSE body."""
 
-    def __init__(self, sse_body: str, *, hang: bool = False) -> None:
+    base_url = "http://localhost:8000"
+
+    def __init__(
+        self,
+        sse_body: str,
+        *,
+        hang: bool = False,
+        provider_mode: str = "provider",
+    ) -> None:
         self.sse_body = sse_body
         self.hang = hang
+        self.provider_mode = provider_mode
         self.sent: list[str] = []
         self.cancelled: str | None = None
         self.created = False
@@ -43,6 +52,17 @@ class FakeClient:
     async def cancel_run(self, run_id: str):
         self.cancelled = run_id
         return SimpleNamespace(id=run_id, status="cancelled")
+
+    async def get_provider_status(self):
+        is_echo = self.provider_mode == "echo"
+        return SimpleNamespace(
+            mode=self.provider_mode,
+            profile=None if is_echo else "default",
+            provider="echo" if is_echo else "openai",
+            model="echo" if is_echo else "gpt-4o-mini",
+            reasoning_effort="auto",
+            capabilities={"reasoning_efforts": ["auto"]},
+        )
 
     async def aclose(self) -> None:
         pass
@@ -77,6 +97,27 @@ async def test_submit_streams_answer_into_transcript():
         assert "Hello world" in rendered
         assert client.sent == ["hello"]
         assert client.created is True  # a session was auto-created
+
+
+async def test_echo_mode_has_persistent_notice_and_marks_demo_response():
+    client = FakeClient(
+        sse_fixtures.load_raw("simple_complete"),
+        provider_mode="echo",
+    )
+    app = PersonalAIApp(client=client)
+
+    async with app.run_test() as pilot:
+        notice = app.query_one("#provider-notice")
+        assert notice.display is True
+        assert "/api" in str(notice.render())
+
+        composer = app.query_one("#composer", Composer)
+        composer.text = "hello"
+        await pilot.press("enter")
+        await _wait_idle(app, pilot)
+
+        rendered = str(app.query_one("#transcript", Transcript).render())
+        assert "[Echo demo response] Hello world" in rendered
 
 
 async def test_composer_re_enabled_after_run_completes():

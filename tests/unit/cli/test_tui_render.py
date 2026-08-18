@@ -7,11 +7,20 @@ from types import SimpleNamespace
 import pytest
 from rich.cells import cell_len
 
-from personal_ai_os.cli.domain.state import TranscriptCell, initial_state
+from personal_ai_os.cli.domain.state import (
+    TranscriptCell,
+    apply_provider_status,
+    initial_state,
+)
 from personal_ai_os.cli.tui import plain_transcript_lines
 from personal_ai_os.cli.tui.app import context_summary_lines, memory_detail_lines
 from personal_ai_os.cli.tui.command_registry import lookup
-from personal_ai_os.cli.tui.render import status_bar_text, status_glyph, transcript_lines
+from personal_ai_os.cli.tui.render import (
+    provider_status_lines,
+    status_bar_text,
+    status_glyph,
+    transcript_lines,
+)
 from tests.unit.cli import sse_fixtures
 
 
@@ -25,6 +34,41 @@ def test_status_bar_shows_session_run_and_status():
 def test_status_bar_approval_state():
     state = sse_fixtures.reduce_fixture("approval_pause")
     assert "waiting_approval" in status_bar_text(state)
+
+
+def test_provider_status_rendering_is_complete_and_secret_free():
+    state = initial_state(session_id="s1")
+    apply_provider_status(
+        state,
+        SimpleNamespace(
+            mode="provider",
+            profile="work",
+            provider="deepseek",
+            model="deepseek-reasoner",
+            reasoning_effort="auto",
+            capabilities={"reasoning_efforts": ["auto"]},
+            api_key="must-not-render",
+        ),
+    )
+
+    status_bar = status_bar_text(state)
+    status_panel = "\n".join(provider_status_lines(state))
+    rendered = "\n".join([status_bar, status_panel])
+
+    for value in (
+        "connected",
+        "provider",
+        "work",
+        "deepseek",
+        "deepseek-reasoner",
+        "auto",
+    ):
+        assert value in rendered
+    assert "profile work" in status_bar
+    assert "provider deepseek" in status_bar
+    assert "Profile         : work" in status_panel
+    assert "Provider        : deepseek" in status_panel
+    assert "must-not-render" not in rendered
 
 
 @pytest.mark.parametrize("width", [60, 80, 120, 160])

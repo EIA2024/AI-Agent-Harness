@@ -49,6 +49,24 @@ event: run.completed      data: {run_id, status}
 event: run.failed / approval.required / run.cancelled
 ```
 
+## Provider
+
+These authenticated endpoints manage the Provider loaded by the running API.
+They are intended for a local TUI and API process that share the same
+`PERSONAL_AI_CONFIG_DIR`; write operations reject a mismatched `config_dir`.
+Provider API keys remain in the OS Keyring and never appear in responses.
+
+| Method | Path | Description |
+|---|---|---|
+| GET | `/v1/provider` | active runtime mode, profile, provider, model, reasoning effort, and public capabilities |
+| POST | `/v1/provider/reload` | validate and atomically reload the active local Profile; body `{config_dir}` |
+| GET | `/v1/provider/models` | list models exposed by the active Provider, when supported |
+| PUT | `/v1/provider/model` | update model/reasoning effort and reload; body `{config_dir, model, reasoning_effort}` |
+
+Reload and model changes are rejected while a Run is active. A successful
+change affects only subsequently started Runs and preserves sessions,
+transcripts, and stored memory.
+
 ## Memories
 
 | Method | Path | Description |
@@ -92,6 +110,7 @@ event: run.failed / approval.required / run.cancelled
 | Method | Path | Description |
 |---|---|---|
 | GET | `/healthz` | liveness |
+| GET | `/readyz` | dependency readiness |
 
 ---
 

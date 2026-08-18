@@ -216,8 +216,21 @@ risk bands.
 ### 6.2 Provider profiles
 
 Multiple LLM configs are stored locally in `~/.personal_ai/profiles.json`
-(outside the repo; secrets never enter git). `personal-ai config init` is an
-interactive wizard; `config list/use/edit/remove` manage them.
+(outside the repo), while API keys are stored only in the OS Keyring.
+`personal-ai config init` is an interactive wizard; `config
+list/use/edit/remove` manage Profile metadata.
+
+`ProviderRuntimeService` owns the public Provider status and a
+`ReloadableProvider` proxy shared by the Runner, Graph, Classifier, Planner,
+and Summarizer. Reload validates and health-checks a replacement before an
+atomic swap; a Run pins one Provider snapshot for its complete execution.
+Failed reloads keep the previous Provider, and active Runs block switching.
+
+The authenticated `/v1/provider` control plane exposes status, model
+enumeration, reload, and model selection. It is local-only in practice:
+write operations require the TUI and API to share the same
+`PERSONAL_AI_CONFIG_DIR`. Without an active Profile the runtime uses
+EchoProvider demo mode, which the TUI labels explicitly.
 
 ### 6.3 Streaming
 

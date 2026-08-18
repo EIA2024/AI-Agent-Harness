@@ -18,6 +18,8 @@ from personal_ai_os.cli.api.dto import (
     ApprovalDTO,
     AuditDTO,
     MemoryDTO,
+    ProviderModelsDTO,
+    ProviderStatusDTO,
     RunDTO,
     SendResult,
     SessionDTO,
@@ -146,6 +148,42 @@ class AsyncAPIClient:
             body["edited_arguments"] = edited_arguments
         data = await self.request("POST", f"/v1/runs/{run_id}/resume", json=body)
         return RunDTO.from_dict(data)
+
+    # -- provider ----------------------------------------------------------
+
+    async def get_provider_status(self) -> ProviderStatusDTO:
+        data = await self.request("GET", "/v1/provider")
+        return ProviderStatusDTO.from_dict(data)
+
+    async def reload_provider(self, config_dir: str) -> ProviderStatusDTO:
+        data = await self.request(
+            "POST",
+            "/v1/provider/reload",
+            json={"config_dir": config_dir},
+        )
+        return ProviderStatusDTO.from_dict(data)
+
+    async def list_provider_models(self) -> ProviderModelsDTO:
+        data = await self.request("GET", "/v1/provider/models")
+        return ProviderModelsDTO.from_dict(data)
+
+    async def update_provider_model(
+        self,
+        *,
+        config_dir: str,
+        model: str,
+        reasoning_effort: str = "auto",
+    ) -> ProviderStatusDTO:
+        data = await self.request(
+            "PUT",
+            "/v1/provider/model",
+            json={
+                "config_dir": config_dir,
+                "model": model,
+                "reasoning_effort": reasoning_effort,
+            },
+        )
+        return ProviderStatusDTO.from_dict(data)
 
     # -- streaming ---------------------------------------------------------
 

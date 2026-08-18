@@ -9,7 +9,7 @@ from personal_ai_os.cli.tui.render import status_bar_text
 
 
 class StatusBar(Static):
-    """One-line context: session · run · state · connection."""
+    """One-line context including API, provider, model, and run state."""
 
     def render_state(self, state: AppState) -> None:
         self.update(status_bar_text(state))

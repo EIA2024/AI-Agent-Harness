@@ -8,7 +8,7 @@
 
 > `docs/agent-memory/`（索引见该目录 `README.md`）
 
-- 开始涉及 CLI / API / 运行时架构演进或相关修复前，先读取 `docs/agent-memory/` 里的相关记录（当前有 `001-cli-v2-upgrade-report.md`）。
+- 开始涉及 CLI / API / 运行时架构演进或相关修复前，先通过 `docs/agent-memory/README.md` 查找并读取相关记录。
 - 完成一段有长期价值的工作后，按 `docs/agent-memory/README.md` 的约定追加一条编号记录并更新索引。
 - 本文件只写**整个工作区必须遵循的硬性约束**；过程事实一律进记忆库。
 
@@ -21,10 +21,11 @@
 - **headless stdout 是契约**：`exec` 的 stdout 只含结果协议，进度/诊断走 stderr；退出码稳定（见 `src/personal_ai_os/cli/output/exit_code.py`）。
 - **交互与 headless 共用 transport/domain，不共用 presentation**——CI 永不依赖 TTY。
 - **Windows 编码**：Rich/Unicode 输出在 GBK 控制台会失败，任何 CLI 入口都必须在解析前 `sys.stdout/stderr.reconfigure(encoding="utf-8")`。
+- **Provider 密钥只进 OS Keyring**：Profile metadata 可写本地配置，API Key 不得明文落盘、进入 API 响应或终端输出。
 
 ## 工具
 
 - 测试：`uv run pytest -q`（或 Windows：`.venv/Scripts/python.exe -m pytest -q`）
-- Lint：`uv run ruff check src apps tests`
+- Lint：`uv run ruff check src connectors apps tests`
 - 门禁：两者全绿。
 - 升级方案/任务卡：`CLI-Upgrade-Plan/`（执行协议见 `00_EXECUTION_PROTOCOL.md`）。

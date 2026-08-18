@@ -60,7 +60,12 @@ def reduce(state: AppState, event: UIEvent) -> AppState:
         if last is not None and last.kind == CELL_ASSISTANT and last.payload.get("streaming"):
             last.text += text
         else:
-            _add(state, CELL_ASSISTANT, now, {"streaming": True}, text)
+            visible_text = (
+                f"[Echo demo response] {text}"
+                if state.provider_status.is_echo
+                else text
+            )
+            _add(state, CELL_ASSISTANT, now, {"streaming": True}, visible_text)
         return state
 
     if kind == UIEventType.ASSISTANT_COMPLETED:

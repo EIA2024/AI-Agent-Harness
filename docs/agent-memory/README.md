@@ -11,6 +11,7 @@
 | 005 | [全分支对抗性审查：最终问题登记](005-adversarial-review-findings.md) | 运行时、安全、连接器、部署与 API 的问题清单 | 2026-08-12 |
 | 006 | [对抗性审查修复方案](006-adversarial-remediation-plan.md) | 对抗性审查问题的修复原则、任务卡与验证计划 | 2026-08-12 |
 | 007 | [安全修复与本地启动收尾](007-security-remediation-and-local-startup.md) | 本轮修复的现役状态、验证结果与跨平台本地启动入口 | 2026-08-13 |
+| 008 | [Provider 运行时、TUI 配置与本地控制面](008-provider-runtime-control-plane.md) | Provider 共享代理、热加载、`/api`、`/model` 与认证控制面 | 2026-08-17 |
 
 ## 命名与维护约定
 

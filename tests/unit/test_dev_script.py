@@ -47,3 +47,9 @@ def test_dev_script_respects_shell_env_without_writing_secret(monkeypatch, tmp_p
     assert env["PERSONAL_AI_API_KEY"] == "from-shell"
     assert env["PERSONAL_AI_KEY_HASH_SECRET"] == "hash-from-shell"
     assert not (tmp_path / ".env").exists()
+
+
+def test_dev_script_uses_configured_local_port():
+    dev = _load_dev_script()
+
+    assert dev._api_url({"PERSONAL_AI_PORT": "8001"}) == "http://127.0.0.1:8001"

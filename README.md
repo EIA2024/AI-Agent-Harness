@@ -36,17 +36,20 @@ Python · FastAPI · LangGraph · SQLAlchemy · PostgreSQL / SQLite
 # 1. 安装依赖
 uv sync --extra dev
 
-# 2. 配置 LLM Provider（OpenAI/Anthropic/DeepSeek/...，支持多套切换）
+# 2. 可选：预先配置 LLM Provider（也可启动后在 TUI 输入 /api）
 uv run python -m apps.cli.main config init
-#    → 交互式向导：请求格式（OpenAI 兼容 / Anthropic）→ Base URL → API Key → 模型
+#    → 配置元数据写入 ~/.personal_ai，API Key 只保存到 OS Keyring
 
 # 3. 一键启动本地开发环境（首次运行会生成并保存本地 API 密钥）
-# macOS / Linux：
+# macOS：双击 start.command，或在 Terminal 中执行：
+./start.command
+# Linux：
 ./start.sh
 # Windows（cmd 或 PowerShell）：
 start.bat
 # → 迁移 SQLite → 启动 API → 打开交互式 TUI
 # → API 文档：http://127.0.0.1:8000/docs
+# → 端口被占用时，在 .env 中设置 PERSONAL_AI_PORT=8001 后重试
 
 # 4. 仅启动 API（默认本地 SQLite）
 export PERSONAL_AI_DEV_API_KEY=replace-with-a-local-secret
@@ -58,18 +61,31 @@ export PERSONAL_AI_API_URL=http://localhost:8000
 uv run python -m apps.cli.main chat
 ```
 
-> 未配置任何 Provider 时系统以 EchoProvider（demo 回显）模式运行，链路完整但 Agent 不会真正推理。
+> 未配置任何 Provider 时，TUI 仍会正常启动并显示持久的 Echo 演示提示；Echo
+> 回复会标记为 `[Echo demo response]`，链路完整但 Agent 不会真正推理。输入
+> `/api` 可直接配置真实 Provider。
 
 ### 多套 Provider 切换
 
 ```bash
 uv run python -m apps.cli.main config list          # 查看已保存的配置
-uv run python -m apps.cli.main config show          # 查看当前生效的配置
+uv run python -m apps.cli.main config show          # 查看本地活动配置
 uv run python -m apps.cli.main config use <name>    # 切换到另一套
 uv run python -m apps.cli.main config edit <name>   # 修改 URL/模型/Key
 uv run python -m apps.cli.main config remove <name> # 删除
-# 切换后重启 API 服务生效
 ```
+
+在本地 TUI 中输入 `/api` 可新增、更新或切换 Profile。首次配置默认使用
+DeepSeek、`https://api.deepseek.com/v1` 和 `deepseek-chat`；API Key 使用
+遮罩输入并只存入 OS Keyring，Keyring 不可用时拒绝明文落盘。输入 `/model`
+可枚举或手动填写模型；DeepSeek 的推理模式由所选模型决定，因此只显示
+`auto（由模型决定）`。
+
+`/api` 和 `/model` 会校验配置并热切换 API 进程中的 Provider，只影响切换后
+开始的新 Run，不重建当前 session，也不清空 transcript 或长期记忆。活动 Run
+期间会拒绝切换。此控制面仅适用于 TUI 与本地 API 共享同一
+`PERSONAL_AI_CONFIG_DIR` 的场景；连接远程 API 时必须在服务端配置。单独运行
+`personal-ai config` 只维护本地 Profile，不会跨机器修改或热加载远程服务。
 
 ## 环境变量
 
@@ -100,7 +116,7 @@ docker compose -f deploy/compose/docker-compose.yml up
 ## 运行测试
 
 ```bash
-uv run pytest -v          # 300+ tests（SQLite 内存）
+uv run pytest -v          # 完整测试套件（SQLite 内存）
 uv run ruff check src connectors apps tests
 bash scripts/smoke.sh     # 端到端冒烟
 ```

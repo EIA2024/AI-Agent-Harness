@@ -29,7 +29,7 @@ uv run ruff check src connectors apps tests
 
 - Every module has unit tests under `tests/unit/` (SQLite in-memory).
 - Integration paths live in `tests/integration/test_vertical_slice.py`.
-- Keep the full suite green: `uv run pytest` (300+ tests) and `ruff` clean.
+- Keep the full suite green: `uv run pytest` and `ruff` clean.
 - New connectors must pass SSRF / path-jail / injection adversarial checks.
 
 ## Commit style

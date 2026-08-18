@@ -23,9 +23,11 @@ from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 DEFAULT_CONFIG_DIR = Path.home() / ".personal_ai"
 DEFAULT_CONFIG_FILE = "profiles.json"
+REASONING_EFFORTS = ("auto", "low", "medium", "high")
 
 #: Common OpenAI-compatible providers → sensible defaults for the wizard.
 KNOWN_PROVIDERS: dict[str, dict[str, str]] = {
@@ -37,6 +39,32 @@ KNOWN_PROVIDERS: dict[str, dict[str, str]] = {
     "qwen": {"format": "openai", "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1", "model": "qwen-plus"},
     "ollama": {"format": "openai", "base_url": "http://localhost:11434/v1", "model": "llama3.1"},
 }
+
+
+def _endpoint_identity(base_url: str) -> tuple[str, int | None] | None:
+    parsed = urlparse(base_url)
+    if not parsed.hostname:
+        return None
+    try:
+        port = parsed.port
+    except ValueError:
+        return None
+    return parsed.hostname.lower(), port
+
+
+def provider_identity(profile: ProviderProfile) -> str:
+    """Derive a public provider identity without trusting the profile name."""
+    if profile.format == "anthropic":
+        return "anthropic"
+
+    base_url = profile.base_url or KNOWN_PROVIDERS["openai"]["base_url"]
+    endpoint = _endpoint_identity(base_url)
+    for provider, preset in KNOWN_PROVIDERS.items():
+        if preset["format"] != profile.format or not preset["base_url"]:
+            continue
+        if endpoint == _endpoint_identity(preset["base_url"]):
+            return provider
+    return "openai-compatible"
 
 
 def _now() -> str:
@@ -118,6 +146,7 @@ class ProviderProfile:
     api_key: str = ""
     base_url: str = ""
     model: str = ""
+    reasoning_effort: str = "auto"
     max_tokens: int = 0  # 0 → provider default (4096 for reasoning models)
     created_at: str = ""
     updated_at: str = ""
@@ -131,6 +160,8 @@ class ProviderProfile:
             self.updated_at = self.created_at
         if self.format not in ("openai", "anthropic"):
             raise ValueError(f"Unknown provider format: {self.format!r}")
+        if self.reasoning_effort not in REASONING_EFFORTS:
+            raise ValueError(f"Unknown reasoning effort: {self.reasoning_effort!r}")
 
     def masked_key(self) -> str:
         """Return a display-safe form of the key (never the full value)."""
@@ -152,6 +183,17 @@ class ProviderProfile:
         data = asdict(self)
         data.pop("api_key", None)
         return data
+
+
+def validate_provider_profile(profile: ProviderProfile) -> None:
+    """Validate profile metadata shared by CLI and runtime reload paths."""
+    if not profile.name.strip():
+        raise ValueError("Provider profile name cannot be empty")
+    if profile.format not in ("openai", "anthropic"):
+        raise ValueError(f"Unknown provider format: {profile.format!r}")
+    if profile.reasoning_effort not in REASONING_EFFORTS:
+        raise ValueError(f"Unknown reasoning effort: {profile.reasoning_effort!r}")
+    _validate_base_url(profile.base_url, profile.name)
 
 
 class ProviderConfigStore:
@@ -204,7 +246,9 @@ class ProviderConfigStore:
                     profile_data["secret_ref"] = secret_ref
                     migrated = True
                 key = self.vault.get(secret_ref) if secret_ref else None
-                profiles[name] = ProviderProfile(api_key=key or "", **profile_data)
+                profile = ProviderProfile(api_key=key or "", **profile_data)
+                validate_provider_profile(profile)
+                profiles[name] = profile
             except (TypeError, ValueError):
                 continue  # skip corrupt entries rather than fail the whole store
         active = raw.get("active")
@@ -254,7 +298,7 @@ class ProviderConfigStore:
         return self.load()["active"]
 
     def add(self, profile: ProviderProfile, *, activate: bool = True) -> None:
-        _validate_base_url(profile.base_url, profile.name)
+        validate_provider_profile(profile)
         if profile.api_key:
             if not self.vault.set(profile.name, profile.api_key):
                 raise RuntimeError(
@@ -283,8 +327,7 @@ class ProviderConfigStore:
         for key, value in fields.items():
             if value is not None and hasattr(profile, key):
                 setattr(profile, key, value)
-        if "base_url" in fields:
-            _validate_base_url(profile.base_url, profile.name)
+        validate_provider_profile(profile)
         profile.updated_at = _now()
         self._save(data["profiles"], data["active"])
         return profile
@@ -296,6 +339,10 @@ class ProviderConfigStore:
         data["active"] = name
         self._save(data["profiles"], name)
         return True
+
+    def clear_active(self) -> None:
+        data = self.load()
+        self._save(data["profiles"], None)
 
     def remove(self, name: str) -> bool:
         data = self.load()

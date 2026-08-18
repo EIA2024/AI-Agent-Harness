@@ -4,6 +4,12 @@
 > 调研与方案日期：2026-08-11  
 > 文档定位：**给执行 Agent 使用的工程实施包，而不是概念性 UI 提案。**
 
+> **历史状态（2026-08-17）**：CLI v2 已合入 `main`。本目录保留原始设计与任务卡，
+> 其中未勾选清单不代表当前实现状态。现役用户合同见
+> [`docs/cli-v2.md`](../docs/cli-v2.md)，架构与后续修复记录见
+> [`docs/ARCHITECTURE.md`](../docs/ARCHITECTURE.md) 和
+> [`docs/agent-memory/README.md`](../docs/agent-memory/README.md)。
+
 ## 0. 一句话目标
 
 把当前 `apps/cli/main.py` 中的“`argparse + print + 手写 ANSI + 手写 SSE` 聊天客户端”，升级成一个以 **Run 状态机、Session、Memory、Tool、Policy/Approval、Audit** 为核心的一等终端操作界面，同时保留稳定的 headless/CI 接口。

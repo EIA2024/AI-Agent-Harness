@@ -9,7 +9,7 @@ from __future__ import annotations
 import enum
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any
+from typing import Any, Protocol
 
 
 class ConnectionState(enum.StrEnum):
@@ -18,6 +18,73 @@ class ConnectionState(enum.StrEnum):
     CONNECTED = "connected"
     RECONNECTING = "reconnecting"
     CLOSED = "closed"
+
+
+class APIConnectionState(enum.StrEnum):
+    UNKNOWN = "unknown"
+    CHECKING = "checking"
+    CONNECTED = "connected"
+    ERROR = "error"
+
+
+class ProviderStatusSource(Protocol):
+    """Public fields returned by ``AsyncAPIClient.get_provider_status``."""
+
+    mode: str
+    profile: str | None
+    provider: str
+    model: str
+    reasoning_effort: str
+    capabilities: dict[str, Any]
+
+
+@dataclass
+class ProviderViewState:
+    """Secret-free snapshot of the API service's active provider."""
+
+    mode: str = "unknown"
+    profile: str | None = None
+    provider: str = "unknown"
+    model: str = "unknown"
+    reasoning_effort: str = "auto"
+    model_enumeration: bool = False
+    reasoning_efforts: tuple[str, ...] = ("auto",)
+
+    @property
+    def is_echo(self) -> bool:
+        return self.mode == "echo"
+
+    @classmethod
+    def from_api_status(cls, status: ProviderStatusSource) -> ProviderViewState:
+        capabilities = status.capabilities or {}
+        efforts = capabilities.get("reasoning_efforts")
+        if not isinstance(efforts, (list, tuple)):
+            efforts = ("auto",)
+        public_efforts = tuple(
+            effort
+            for effort in (str(value) for value in efforts)
+            if effort in {"auto", "low", "medium", "high"}
+        ) or ("auto",)
+        return cls(
+            mode=str(status.mode or "unknown"),
+            profile=str(status.profile) if status.profile else None,
+            provider=str(status.provider or "unknown"),
+            model=str(status.model or "unknown"),
+            reasoning_effort=str(status.reasoning_effort or "auto"),
+            model_enumeration=bool(capabilities.get("model_enumeration", False)),
+            reasoning_efforts=public_efforts,
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "mode": self.mode,
+            "profile": self.profile,
+            "provider": self.provider,
+            "model": self.model,
+            "reasoning_effort": self.reasoning_effort,
+            "model_enumeration": self.model_enumeration,
+            "reasoning_efforts": list(self.reasoning_efforts),
+        }
 
 
 @dataclass
@@ -76,7 +143,8 @@ class AppState:
     run_id: str | None = None
     run_status: str = "unknown"  # running | waiting_approval | completed | failed | cancelled
     connection_state: ConnectionState = ConnectionState.DISCONNECTED
-    model: str | None = None
+    api_connection_state: APIConnectionState = APIConnectionState.UNKNOWN
+    provider_status: ProviderViewState = field(default_factory=ProviderViewState)
     transcript: list[TranscriptCell] = field(default_factory=list)
     tool_calls: dict[str, ToolViewState] = field(default_factory=dict)
     pending_approval: dict[str, Any] | None = None
@@ -95,13 +163,19 @@ class AppState:
         parts = [c.text for c in self.transcript if c.kind == CELL_ASSISTANT]
         return "\n".join(p for p in parts if p)
 
+    @property
+    def model(self) -> str | None:
+        model = self.provider_status.model
+        return None if model == "unknown" else model
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "session_id": self.session_id,
             "run_id": self.run_id,
             "run_status": self.run_status,
             "connection_state": self.connection_state.value,
-            "model": self.model,
+            "api_connection_state": self.api_connection_state.value,
+            "provider_status": self.provider_status.to_dict(),
             "transcript": [c.__dict__ for c in self.transcript],
             "tool_calls": {k: v.to_dict() for k, v in self.tool_calls.items()},
             "pending_approval": self.pending_approval,
@@ -112,3 +186,17 @@ class AppState:
 
 def initial_state(*, session_id: str | None = None) -> AppState:
     return AppState(session_id=session_id)
+
+
+def begin_provider_status_query(state: AppState) -> None:
+    state.api_connection_state = APIConnectionState.CHECKING
+
+
+def apply_provider_status(state: AppState, status: ProviderStatusSource) -> None:
+    """Install the exact secret-free status returned by the API service."""
+    state.provider_status = ProviderViewState.from_api_status(status)
+    state.api_connection_state = APIConnectionState.CONNECTED
+
+
+def fail_provider_status_query(state: AppState) -> None:
+    state.api_connection_state = APIConnectionState.ERROR

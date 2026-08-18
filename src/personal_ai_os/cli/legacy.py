@@ -186,7 +186,7 @@ def cmd_chat(args: argparse.Namespace) -> None:
     if not ProviderConfigStore().get_active() and sys.stdin.isatty():
         print("提示：服务器未配置 LLM provider（可能处于 demo 回显模式）。")
         print("      运行 `personal-ai config init` 配置 OpenAI/Anthropic/DeepSeek 等，")
-        print("      然后重启 API 服务即可用真实模型。")
+        print("      本地 TUI 也可输入 `/api` 配置并立即热加载真实模型。")
         print()
 
     while True:
@@ -363,7 +363,8 @@ def _wizard_init() -> None:
     store.add(profile, activate=True)
     print()
     print(f"✅ 已保存配置「{name}」（{fmt}，{base_url}）并设为当前使用。")
-    print("   重启 API 服务后生效；用 `personal-ai config list/use` 切换多套配置。")
+    print("   用 `personal-ai config list/use` 管理多套配置。")
+    print("   运行中的本地 API 可在 TUI 输入 `/api` 校验并热加载，无需重启。")
 
 
 def cmd_config(args: argparse.Namespace) -> None:

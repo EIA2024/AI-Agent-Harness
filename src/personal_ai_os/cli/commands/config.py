@@ -12,18 +12,26 @@ import sys
 import typer
 
 from personal_ai_os.cli.commands.table_output import emit
-from personal_ai_os.model_gateway import ProviderConfigStore
+from personal_ai_os.model_gateway import (
+    ProviderConfigStore,
+    provider_capabilities,
+    validate_provider_profile,
+)
 
 app = typer.Typer(help="Manage local LLM provider profiles (multi-API switching)")
 
 
 def _public_profile(profile) -> dict:  # noqa: ANN001
     """Serialize provider metadata without ever copying the secret field."""
+    capabilities = provider_capabilities(profile, profile.model)
+    reasoning_effort = getattr(profile, "reasoning_effort", "auto")
     return {
         "name": profile.name,
         "format": profile.format,
         "base_url": profile.base_url,
         "model": profile.model,
+        "reasoning_effort": reasoning_effort,
+        "capabilities": capabilities.to_dict(),
         "max_tokens": getattr(profile, "max_tokens", 0),
         "created_at": getattr(profile, "created_at", ""),
         "updated_at": getattr(profile, "updated_at", ""),
@@ -60,12 +68,20 @@ def config_list(json_mode: bool = typer.Option(False, "--json", help="JSON outpu
                 "name": ("▶ " if p.name == active else "  ") + p.name,
                 "format": p.format,
                 "model": p.model or "-",
+                "effort": p.reasoning_effort,
                 "base_url": p.base_url or "-",
                 "key": p.masked_key(),
             }
             for p in profiles
         ],
-        columns=[("NAME", "name"), ("FORMAT", "format"), ("MODEL", "model"), ("BASE URL", "base_url"), ("KEY", "key")],
+        columns=[
+            ("NAME", "name"),
+            ("FORMAT", "format"),
+            ("MODEL", "model"),
+            ("EFFORT", "effort"),
+            ("BASE URL", "base_url"),
+            ("KEY", "key"),
+        ],
     )
 
 
@@ -85,6 +101,7 @@ def config_show(json_mode: bool = typer.Option(False, "--json", help="JSON outpu
         f"format    : {profile.format}\n"
         f"base_url  : {profile.base_url or '-'}\n"
         f"model     : {profile.model or '-'}\n"
+        f"reasoning : {profile.reasoning_effort}\n"
         f"api_key   : {profile.masked_key()}\n"
         f"updated_at: {profile.updated_at}\n"
     )
@@ -170,12 +187,20 @@ def config_validate() -> None:
     store = ProviderConfigStore()
     problems: list[str] = []
     for profile in store.list_profiles():
-        if profile.format not in ("openai", "anthropic"):
-            problems.append(f"{profile.name}: unsupported format {profile.format!r}")
+        try:
+            validate_provider_profile(profile)
+            capabilities = provider_capabilities(profile, profile.model)
+            if profile.reasoning_effort not in capabilities.reasoning_efforts:
+                supported = ", ".join(capabilities.reasoning_efforts)
+                problems.append(
+                    f"{profile.name}: reasoning effort "
+                    f"{profile.reasoning_effort!r} is unsupported "
+                    f"(supported: {supported})"
+                )
+        except ValueError as exc:
+            problems.append(f"{profile.name}: {exc}")
         if not profile.api_key:
             problems.append(f"{profile.name}: missing api_key")
-        if not profile.base_url and profile.format == "openai":
-            problems.append(f"{profile.name}: openai profile missing base_url")
     if problems:
         for problem in problems:
             sys.stdout.write(f"error: {problem}\n")

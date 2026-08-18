@@ -46,6 +46,20 @@ class RunResumeBody(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Provider
+# ---------------------------------------------------------------------------
+
+
+class ProviderReloadBody(BaseModel):
+    config_dir: str = Field(..., min_length=1, max_length=4096)
+
+
+class ProviderModelUpdateBody(ProviderReloadBody):
+    model: str = Field(..., min_length=1, max_length=200)
+    reasoning_effort: Literal["auto", "low", "medium", "high"] = "auto"
+
+
+# ---------------------------------------------------------------------------
 # Memories
 # ---------------------------------------------------------------------------
 

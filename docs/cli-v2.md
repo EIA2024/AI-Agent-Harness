@@ -56,6 +56,34 @@ Exit codes: `0` completed · `1` internal · `2` usage/config · `3` auth ·
   the stream resumes in place, preserving the transcript.
 - Notifications (terminal bell) are opt-in via `PERSONAL_AI_NOTIFY=1`.
 
+## Provider setup and hot switching
+
+The TUI reads the API service's runtime Provider status at startup. With no
+active Provider it remains usable in Echo demo mode, keeps a visible prompt to
+run `/api`, and labels every demo answer `[Echo demo response]`.
+
+- `/api` adds, updates, or activates a local Provider Profile. First-time setup
+  defaults to DeepSeek, `https://api.deepseek.com/v1`, and `deepseek-chat`.
+- Provider API keys use a masked input and are stored only in the operating
+  system Keyring. If Keyring storage is unavailable, setup fails instead of
+  writing a plaintext key to `profiles.json`.
+- `/model` lists models through the active Provider when supported and falls
+  back to a manual model ID when enumeration fails.
+- DeepSeek exposes reasoning effort as `auto（由模型决定）`; select
+  `deepseek-chat` or `deepseek-reasoner` rather than sending unsupported
+  `low` / `medium` / `high` parameters.
+- A successful `/api` or `/model` change is validated and atomically reloaded
+  into the API runtime. It affects subsequent Runs while preserving the current
+  session, transcript, and stored memory. Changes are rejected during an active
+  Run.
+
+Hot switching is a local control plane: the TUI and API must point at the same
+`PERSONAL_AI_CONFIG_DIR`. A TUI connected to a remote API is told to configure
+the server and cannot apply its local profiles remotely. `personal-ai config`
+uses the same `ProviderConfigStore`, presets, validation, capability rules, and
+Keyring storage, but the command itself only edits local profiles; use the
+local TUI `/api` flow to validate and reload an already-running API process.
+
 ## Environment
 
 `PERSONAL_AI_API_URL` (default `http://localhost:8000`),

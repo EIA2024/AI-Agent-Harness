@@ -277,6 +277,9 @@ class AnthropicProvider:
         except Exception:
             return False
 
+    async def list_models(self) -> list[str]:
+        return list(self.models or [])
+
 
 # ---------------------------------------------------------------------------
 # OpenAICompatibleProvider
@@ -356,12 +359,14 @@ class OpenAICompatibleProvider:
         api_key: str,
         base_url: str = "https://api.openai.com/v1",
         default_model: str = "gpt-4o-mini",
+        reasoning_effort: str = "auto",
         default_max_tokens: int = 4096,
         transport: httpx.AsyncBaseTransport | None = None,
     ):
         self.api_key = api_key
         self.base_url = base_url.rstrip("/")
         self.default_model = default_model
+        self.reasoning_effort = reasoning_effort
         # Reasoning models (DeepSeek v4, Qwen, ...) count chain-of-thought
         # tokens against max_tokens; 1024 is far too small and truncates the
         # answer. 4096 leaves room for thinking + the actual reply.
@@ -385,6 +390,8 @@ class OpenAICompatibleProvider:
             payload["stream_options"] = {"include_usage": True}
         if request.temperature is not None:
             payload["temperature"] = request.temperature
+        if self.reasoning_effort != "auto":
+            payload["reasoning_effort"] = self.reasoning_effort
 
         # DeepSeek (and some other OpenAI-compatible endpoints) reject tool names
         # that are not ^[a-zA-Z0-9_-]+$ — our namespaces use dots ("calculator.evaluate").
@@ -618,6 +625,33 @@ class OpenAICompatibleProvider:
         except Exception:
             return False
 
+    async def list_models(self) -> list[str]:
+        try:
+            client_kwargs: dict[str, Any] = {"timeout": httpx.Timeout(10)}
+            if self._transport is not None:
+                client_kwargs["transport"] = self._transport
+            async with httpx.AsyncClient(**client_kwargs) as client:
+                response = await client.get(
+                    f"{self.base_url}/models",
+                    headers={"Authorization": f"Bearer {self.api_key}"},
+                )
+                if response.status_code >= 400:
+                    raise ModelError(
+                        "OpenAI-compatible model enumeration failed "
+                        f"with HTTP {response.status_code}"
+                    )
+                data = response.json()
+        except ModelError:
+            raise
+        except Exception as exc:
+            raise ModelError("OpenAI-compatible model enumeration failed") from exc
+        models = {
+            str(item["id"])
+            for item in data.get("data", [])
+            if isinstance(item, dict) and item.get("id")
+        }
+        return sorted(models)
+
 
 # ---------------------------------------------------------------------------
 # FakeProvider
@@ -708,3 +742,6 @@ class EchoProvider:
 
     async def health_check(self) -> bool:
         return True
+
+    async def list_models(self) -> list[str]:
+        return []

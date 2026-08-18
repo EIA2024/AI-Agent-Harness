@@ -30,6 +30,7 @@ from .routers import (
     automations,
     memories,
     messages,
+    provider,
     runs,
     sessions,
     stream,
@@ -249,6 +250,7 @@ def create_app(services: ServiceContainer | None = None) -> FastAPI:
     app.include_router(approvals.router)
     app.include_router(automations.router)
     app.include_router(audit.router)
+    app.include_router(provider.router)
 
     app.add_api_route("/healthz", healthz, methods=["GET"], tags=["system"])
     app.add_api_route("/readyz", readyz, methods=["GET"], tags=["system"])

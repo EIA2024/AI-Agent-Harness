@@ -27,14 +27,41 @@ def status_glyph(run_status: str) -> str:
 
 
 def status_bar_text(state: AppState, *, width: int | None = None) -> str:
-    """Single-line status: session · run · state · connection."""
+    """Single-line status with separate API, provider, and run-stream state."""
     session = (state.session_id or "-")[:8]
     run = (state.run_id or "-")[:8]
+    provider = state.provider_status
     rendered = (
-        f"session {session} · run {run} · {state.run_status} · "
-        f"{state.connection_state.value}"
+        f"session {_status_value(session)} · run {_status_value(run)} "
+        f"({_status_value(state.run_status)}) · "
+        f"API {state.api_connection_state.value} · "
+        f"LLM {_status_value(provider.mode)} · "
+        f"profile {_status_value(provider.profile)} · "
+        f"provider {_status_value(provider.provider)} · "
+        f"model {_status_value(provider.model)} · "
+        f"effort {_status_value(provider.reasoning_effort)} · "
+        f"stream {state.connection_state.value}"
     )
     return set_cell_size(rendered, width) if width is not None else rendered
+
+
+def provider_status_lines(state: AppState) -> list[str]:
+    """Secret-free detail lines for the ``/status`` panel."""
+    provider = state.provider_status
+    mode = "Echo demo" if provider.is_echo else _status_value(provider.mode)
+    return [
+        f"API service     : {state.api_connection_state.value}",
+        f"LLM mode        : {mode}",
+        f"Profile         : {_status_value(provider.profile)}",
+        f"Provider        : {_status_value(provider.provider)}",
+        f"Model           : {_status_value(provider.model)}",
+        f"Reasoning effort: {_status_value(provider.reasoning_effort)}",
+        f"Run stream      : {state.connection_state.value}",
+    ]
+
+
+def _status_value(value: object | None) -> str:
+    return strip_control_sequences(str(value)) if value else "-"
 
 
 def cell_lines(cell: TranscriptCell) -> list[str]:
